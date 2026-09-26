@@ -15,7 +15,7 @@ jobs:
     steps:
 
       # ======================================================
-      # CHECKOUT
+      # CHECKOUT PROCESSOR REPOSITORY
       # ======================================================
 
       - name: Checkout repository
@@ -31,15 +31,19 @@ jobs:
           python-version: "3.12"
 
       # ======================================================
-      # SYSTEM INFO
+      # SYSTEM INFORMATION
       # ======================================================
 
       - name: System information
         shell: bash
         run: |
           echo "========================================"
-          echo "PUNE CHUNK PROCESSOR"
+          echo "PUNE 1KM CHUNK PROCESSOR"
           echo "========================================"
+
+          echo
+          echo "Repository:"
+          echo "$GITHUB_REPOSITORY"
 
           echo
           echo "CPU:"
@@ -54,32 +58,100 @@ jobs:
           df -h
 
       # ======================================================
-      # DOWNLOAD RAW RELEASE
+      # INSTALL SYSTEM TOOLS
       # ======================================================
 
-      - name: Download raw data
+      - name: Install system tools
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            curl \
+            ca-certificates \
+            gdal-bin \
+            libgdal-dev \
+            libgeos-dev \
+            libproj-dev \
+            proj-bin \
+            libspatialindex-dev
+
+          echo
+          echo "System tools installed."
+
+          echo
+          echo "GDAL:"
+          gdalinfo --version
+
+      # ======================================================
+      # DOWNLOAD RAW DATA FROM RAW REPOSITORY
+      # ======================================================
+
+      - name: Download raw Pune release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
-          mkdir -p data/raw
+          RAW_REPO="Jitujoshi71/pune_raw_py"
+          RAW_TAG="pune-raw-v1"
 
-          echo "Downloading raw Pune release..."
+          echo
+          echo "========================================"
+          echo "RAW PUNE DATA"
+          echo "========================================"
+
+          echo
+          echo "Raw repository:"
+          echo "$RAW_REPO"
+
+          echo
+          echo "Release:"
+          echo "$RAW_TAG"
+
+          echo
+          echo "Checking GitHub Release..."
+
+          gh release view \
+            "$RAW_TAG" \
+            --repo "$RAW_REPO"
+
+          echo
+          echo "Release found."
+
+          rm -rf /tmp/pune-release
+          mkdir -p /tmp/pune-release
+
+          echo
+          echo "Downloading release assets..."
 
           gh release download \
-            pune-raw-v1 \
+            "$RAW_TAG" \
+            --repo "$RAW_REPO" \
             --dir /tmp/pune-release \
             --clobber
+
+          echo
+          echo "Downloaded assets:"
+          echo
+
+          ls -lah /tmp/pune-release
+
+      # ======================================================
+      # PREPARE RAW DIRECTORIES
+      # ======================================================
+
+      - name: Prepare raw directories
+        shell: bash
+        run: |
+          set -e
 
           mkdir -p data/raw/osm
           mkdir -p data/raw/dem
           mkdir -p data/raw/opencity
-
-          echo
-          echo "Release assets:"
-          ls -lh /tmp/pune-release
 
       # ======================================================
       # RESTORE OSM
@@ -90,62 +162,168 @@ jobs:
         run: |
           set -e
 
-          FILE="/tmp/pune-release/central-zone.osm.pbf"
+          SOURCE="/tmp/pune-release/central-zone.osm.pbf"
+          DEST="data/raw/osm/central-zone.osm.pbf"
 
-          if [ ! -f "$FILE" ]; then
-            echo "ERROR: OSM asset not found."
+          echo
+          echo "========================================"
+          echo "RESTORING OSM"
+          echo "========================================"
+
+          if [ ! -f "$SOURCE" ]; then
+            echo
+            echo "ERROR:"
+            echo "OSM release asset not found:"
+            echo "$SOURCE"
+            echo
+            echo "Available assets:"
+            ls -lah /tmp/pune-release
             exit 1
           fi
 
-          cp \
-            "$FILE" \
-            data/raw/osm/central-zone.osm.pbf
+          cp "$SOURCE" "$DEST"
 
-          ls -lh \
-            data/raw/osm/central-zone.osm.pbf
+          echo
+          echo "OSM restored:"
+          ls -lh "$DEST"
+
+          SIZE=$(stat -c%s "$DEST")
+
+          echo
+          echo "OSM size:"
+          echo "$SIZE bytes"
+
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo
+            echo "ERROR: OSM file is suspiciously small."
+            exit 1
+          fi
+
+          echo
+          echo "OSM validation passed."
 
       # ======================================================
       # RESTORE DEM
       # ======================================================
 
-      - name: Restore DEM
+      - name: Restore DEM tiles
         shell: bash
         run: |
           set -e
 
-          for TILE in \
-            N18E073 \
-            N18E074 \
-            N19E073 \
-            N19E074
-          do
+          echo
+          echo "========================================"
+          echo "RESTORING DEM"
+          echo "========================================"
 
-            FILE="/tmp/pune-release/${TILE}.hgt.gz"
+          TILES=(
+            "N18E073"
+            "N18E074"
+            "N19E073"
+            "N19E074"
+          )
 
-            if [ -f "$FILE" ]; then
+          for TILE in "${TILES[@]}"; do
 
-              cp \
-                "$FILE" \
-                "data/raw/dem/${TILE}.hgt.gz"
+            SOURCE="/tmp/pune-release/${TILE}.hgt.gz"
+            DEST="data/raw/dem/${TILE}.hgt.gz"
+
+            echo
+            echo "DEM: $TILE"
+
+            if [ -f "$SOURCE" ]; then
+
+              cp "$SOURCE" "$DEST"
 
               echo "Restored:"
-              ls -lh \
-                "data/raw/dem/${TILE}.hgt.gz"
+              ls -lh "$DEST"
 
             else
 
               echo "WARNING:"
-              echo "DEM tile missing: $TILE"
+              echo "DEM tile not found:"
+              echo "$SOURCE"
 
             fi
 
           done
 
+          echo
+          echo "Available DEM files:"
+          ls -lh data/raw/dem || true
+
       # ======================================================
-      # INSTALL DEPENDENCIES
+      # RESTORE OPENCITY CATALOG
       # ======================================================
 
-      - name: Install dependencies
+      - name: Restore OpenCity catalog
+        shell: bash
+        run: |
+          set -e
+
+          SOURCE="/tmp/pune-release/opencity_package_search.json"
+          DEST="data/raw/opencity/package_search.json"
+
+          echo
+          echo "========================================"
+          echo "RESTORING OPENCITY CATALOG"
+          echo "========================================"
+
+          if [ -f "$SOURCE" ]; then
+
+            cp "$SOURCE" "$DEST"
+
+            echo
+            echo "OpenCity catalog restored:"
+            ls -lh "$DEST"
+
+          else
+
+            echo
+            echo "WARNING:"
+            echo "OpenCity catalog release asset not found."
+
+            echo
+            echo "Available release assets:"
+            ls -lah /tmp/pune-release
+
+          fi
+
+      # ======================================================
+      # SHOW RAW DATA
+      # ======================================================
+
+      - name: Verify raw data
+        shell: bash
+        run: |
+          set -e
+
+          echo
+          echo "========================================"
+          echo "RAW DATA VERIFICATION"
+          echo "========================================"
+
+          echo
+          echo "OSM:"
+          ls -lh data/raw/osm
+
+          echo
+          echo "DEM:"
+          ls -lh data/raw/dem
+
+          echo
+          echo "OpenCity:"
+          ls -lh data/raw/opencity
+
+          echo
+          echo "Total raw data:"
+          du -sh data/raw
+
+      # ======================================================
+      # INSTALL PYTHON DEPENDENCIES
+      # ======================================================
+
+      - name: Install Python dependencies
         shell: bash
         run: |
           set -e
@@ -157,8 +335,12 @@ jobs:
           python -m pip install \
             -r requirements.txt
 
+          echo
+          echo "Installed Python packages:"
+          python -m pip list
+
       # ======================================================
-      # VALIDATE PYTHON
+      # PYTHON VALIDATION
       # ======================================================
 
       - name: Validate Python
@@ -166,44 +348,133 @@ jobs:
         run: |
           set -e
 
+          echo
+          echo "========================================"
+          echo "PYTHON VALIDATION"
+          echo "========================================"
+
+          python --version
+
           python -m py_compile \
             processor.py
 
-          echo "Python syntax OK."
+          echo
+          echo "Python syntax validation passed."
+
+      # ======================================================
+      # TEST IMPORTS
+      # ======================================================
+
+      - name: Test geospatial libraries
+        shell: bash
+        run: |
+          set -e
+
+          python - <<'PY'
+          import geopandas
+          import numpy
+          import pyproj
+          import shapely
+          import requests
+          import pyrosm
+
+          print("GeoPandas:", geopandas.__version__)
+          print("NumPy:", numpy.__version__)
+          print("PyProj:", pyproj.__version__)
+          print("Shapely:", shapely.__version__)
+          print("Requests:", requests.__version__)
+          print("Pyrosm:", pyrosm.__version__)
+
+          print()
+          print("All Python geospatial imports OK.")
+          PY
 
       # ======================================================
       # RUN PROCESSOR
       # ======================================================
 
-      - name: Process Pune
+      - name: Process Pune 1km chunks
         shell: bash
         run: |
           set -e
+
+          echo
+          echo "========================================"
+          echo "STARTING PUNE PROCESSING"
+          echo "========================================"
 
           python processor.py
 
       # ======================================================
-      # ZIP RESULT
+      # SHOW RESULT
+      # ======================================================
+
+      - name: Show processed result
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "========================================"
+          echo "PROCESSED DATA"
+          echo "========================================"
+
+          if [ -d data/chunks ]; then
+
+            echo
+            echo "Output size:"
+            du -sh data/chunks
+
+            echo
+            echo "Chunk count:"
+            find data/chunks \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              | wc -l
+
+            echo
+            echo "Output files:"
+            find data/chunks \
+              -maxdepth 2 \
+              -type f \
+              | head -100
+
+          else
+
+            echo "No processed output found."
+
+          fi
+
+      # ======================================================
+      # CREATE ARCHIVE
       # ======================================================
 
       - name: Create processed archive
+        if: success()
         shell: bash
         run: |
           set -e
+
+          echo
+          echo "========================================"
+          echo "CREATING ARCHIVE"
+          echo "========================================"
 
           tar \
             -czf \
             pune-1km-chunks.tar.gz \
             data/chunks
 
-          ls -lh \
-            pune-1km-chunks.tar.gz
+          echo
+          echo "Archive:"
+          ls -lh pune-1km-chunks.tar.gz
 
       # ======================================================
       # UPLOAD ARTIFACT
       # ======================================================
 
       - name: Upload processed chunks
+        if: success()
         uses: actions/upload-artifact@v5
         with:
           name: pune-1km-chunks
@@ -226,22 +497,19 @@ jobs:
           echo "FINAL REPORT"
           echo "========================================"
 
+          echo
+          echo "DISK:"
           df -h
 
           echo
-          echo "Chunk count:"
-
-          if [ -f data/chunks/summary.json ]; then
-            python - <<'PY'
-          import json
-
-          with open("data/chunks/summary.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          print(data)
-          PY
-          fi
+          echo "RAW DATA:"
+          du -sh data/raw 2>/dev/null || true
 
           echo
-          echo "Output:"
+          echo "PROCESSED DATA:"
           du -sh data/chunks 2>/dev/null || true
+
+          echo
+          echo "========================================"
+          echo "PROCESSING JOB FINISHED"
+          echo "========================================"
