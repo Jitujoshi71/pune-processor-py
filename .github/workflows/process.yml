@@ -1,4 +1,4 @@
-name: Process Pune 1km Chunks v2
+name: Process Pune 1km Chunks
 
 on:
   workflow_dispatch:
@@ -8,22 +8,15 @@ permissions:
 
 jobs:
   process:
+
     runs-on: ubuntu-latest
 
     timeout-minutes: 360
 
     steps:
 
-      # ======================================================
-      # CHECKOUT
-      # ======================================================
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      # ======================================================
-      # SYSTEM
-      # ======================================================
 
       - name: System information
         run: |
@@ -44,11 +37,7 @@ jobs:
           echo "DISK:"
           df -h
 
-      # ======================================================
-      # OSMIUM
-      # ======================================================
-
-      - name: Install osmium-tool
+      - name: Install osmium
         run: |
           set -e
 
@@ -57,19 +46,14 @@ jobs:
           sudo apt-get install -y \
             osmium-tool
 
-          echo
           osmium version
-
-      # ======================================================
-      # PYTHON
-      # ======================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
+      - name: Install Python packages
         run: |
           set -e
 
@@ -79,19 +63,11 @@ jobs:
           pip install \
             -r requirements.txt
 
-      # ======================================================
-      # DOWNLOAD RAW PBF
-      # ======================================================
-
-      - name: Download Pune raw OSM PBF
+      - name: Download raw PBF
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-
-          echo "=========================================="
-          echo "DOWNLOADING RAW PBF"
-          echo "=========================================="
 
           mkdir -p raw
 
@@ -104,53 +80,36 @@ jobs:
 
           test -f raw/central-zone.osm.pbf
 
-          ls -lh raw/central-zone.osm.pbf
-
-      # ======================================================
-      # INPUT VALIDATION
-      # ======================================================
+          ls -lh \
+            raw/central-zone.osm.pbf
 
       - name: Validate PBF
         run: |
           set -e
 
-          echo "=========================================="
-          echo "OSM FILE INFO"
-          echo "=========================================="
-
           osmium fileinfo \
             raw/central-zone.osm.pbf \
             --extended
 
-      # ======================================================
-      # PROCESS
-      # ======================================================
-
-      - name: Process Pune 1km chunks
+      - name: Run processor
         run: |
           set -e
 
-          echo "=========================================="
-          echo "STARTING PROCESSOR"
-          echo "=========================================="
-
           python -u processor.py
 
-      # ======================================================
-      # OUTPUT INSPECTION
-      # ======================================================
-
-      - name: Inspect generated chunks
+      - name: Verify output
         if: always()
         run: |
+          set +e
+
           echo "=========================================="
-          echo "GENERATED OUTPUT"
+          echo "VERIFYING OUTPUT"
           echo "=========================================="
 
           if [ -d data/chunks ]; then
 
             echo
-            echo "Chunk count:"
+            echo "CHUNK COUNT:"
 
             find data/chunks \
               -mindepth 1 \
@@ -159,7 +118,7 @@ jobs:
               | wc -l
 
             echo
-            echo "First chunks:"
+            echo "FIRST CHUNKS:"
 
             find data/chunks \
               -mindepth 1 \
@@ -169,7 +128,7 @@ jobs:
               | head -20
 
             echo
-            echo "Sample files:"
+            echo "SAMPLE FILES:"
 
             find data/chunks \
               -type f \
@@ -178,50 +137,25 @@ jobs:
 
           else
 
-            echo "data/chunks does not exist."
+            echo "ERROR: data/chunks missing"
 
           fi
 
-      # ======================================================
-      # SUMMARY
-      # ======================================================
-
-      - name: Show summary
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "SUMMARY"
-          echo "=========================================="
+          echo
+          echo "SUMMARY:"
 
           if [ -f data/summary.json ]; then
             cat data/summary.json
-          else
-            echo "summary.json not found."
           fi
 
-      # ======================================================
-      # ARCHIVE
-      # ======================================================
-
-      - name: Archive information
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "ARCHIVE"
-          echo "=========================================="
+          echo
+          echo "ARCHIVE:"
 
           if [ -f pune-1km-chunks.tar.gz ]; then
-            ls -lh \
-              pune-1km-chunks.tar.gz
-          else
-            echo "Archive not found."
+            ls -lh pune-1km-chunks.tar.gz
           fi
 
-      # ======================================================
-      # UPLOAD
-      # ======================================================
-
-      - name: Upload processed chunks
+      - name: Upload processed data
         if: success()
         uses: actions/upload-artifact@v4
         with:
