@@ -1,515 +1,79 @@
 name: Process Pune 1km Chunks
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   process:
-    name: Process Pune Raw Data
     runs-on: ubuntu-latest
 
-    timeout-minutes: 350
-
     steps:
-
-      # ======================================================
-      # CHECKOUT PROCESSOR REPOSITORY
-      # ======================================================
-
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      # ======================================================
-      # PYTHON
-      # ======================================================
+      - name: Checkout processor
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # ======================================================
-      # SYSTEM INFORMATION
-      # ======================================================
-
-      - name: System information
-        shell: bash
+      - name: Install dependencies
         run: |
-          echo "========================================"
-          echo "PUNE 1KM CHUNK PROCESSOR"
-          echo "========================================"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-          echo
-          echo "Repository:"
-          echo "$GITHUB_REPOSITORY"
-
-          echo
-          echo "CPU:"
-          nproc
-
-          echo
-          echo "RAM:"
-          free -h
-
-          echo
-          echo "DISK:"
-          df -h
-
-      # ======================================================
-      # INSTALL SYSTEM TOOLS
-      # ======================================================
-
-      - name: Install system tools
-        shell: bash
-        run: |
-          set -e
-
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            curl \
-            ca-certificates \
-            gdal-bin \
-            libgdal-dev \
-            libgeos-dev \
-            libproj-dev \
-            proj-bin \
-            libspatialindex-dev
-
-          echo
-          echo "System tools installed."
-
-          echo
-          echo "GDAL:"
-          gdalinfo --version
-
-      # ======================================================
-      # DOWNLOAD RAW DATA FROM RAW REPOSITORY
-      # ======================================================
-
-      - name: Download raw Pune release
-        shell: bash
+      - name: Download Pune raw release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          mkdir -p raw
 
-          RAW_REPO="Jitujoshi71/pune_raw_py"
-          RAW_TAG="pune-raw-v1"
+          gh release download pune-raw-v1 \
+            --repo Jitujoshi71/pune_raw_py \
+            --pattern "central-zone.osm.pbf" \
+            --dir raw
 
-          echo
-          echo "========================================"
-          echo "RAW PUNE DATA"
-          echo "========================================"
+          echo "Downloaded files:"
+          ls -lh raw
 
-          echo
-          echo "Raw repository:"
-          echo "$RAW_REPO"
+      - name: Run processor
+        env:
+          RAW_DIR: raw
+          OSM_FILE: raw/central-zone.osm.pbf
 
-          echo
-          echo "Release:"
-          echo "$RAW_TAG"
+          # Pune-wide processing area
+          BBOX: "73.70,18.40,74.05,18.70"
 
-          echo
-          echo "Checking GitHub Release..."
+          CHUNK_SIZE_M: "1000"
+          OUTPUT_DIR: "data/chunks"
 
-          gh release view \
-            "$RAW_TAG" \
-            --repo "$RAW_REPO"
-
-          echo
-          echo "Release found."
-
-          rm -rf /tmp/pune-release
-          mkdir -p /tmp/pune-release
-
-          echo
-          echo "Downloading release assets..."
-
-          gh release download \
-            "$RAW_TAG" \
-            --repo "$RAW_REPO" \
-            --dir /tmp/pune-release \
-            --clobber
-
-          echo
-          echo "Downloaded assets:"
-          echo
-
-          ls -lah /tmp/pune-release
-
-      # ======================================================
-      # PREPARE RAW DIRECTORIES
-      # ======================================================
-
-      - name: Prepare raw directories
-        shell: bash
         run: |
-          set -e
-
-          mkdir -p data/raw/osm
-          mkdir -p data/raw/dem
-          mkdir -p data/raw/opencity
-
-      # ======================================================
-      # RESTORE OSM
-      # ======================================================
-
-      - name: Restore OSM
-        shell: bash
-        run: |
-          set -e
-
-          SOURCE="/tmp/pune-release/central-zone.osm.pbf"
-          DEST="data/raw/osm/central-zone.osm.pbf"
-
-          echo
-          echo "========================================"
-          echo "RESTORING OSM"
-          echo "========================================"
-
-          if [ ! -f "$SOURCE" ]; then
-            echo
-            echo "ERROR:"
-            echo "OSM release asset not found:"
-            echo "$SOURCE"
-            echo
-            echo "Available assets:"
-            ls -lah /tmp/pune-release
-            exit 1
-          fi
-
-          cp "$SOURCE" "$DEST"
-
-          echo
-          echo "OSM restored:"
-          ls -lh "$DEST"
-
-          SIZE=$(stat -c%s "$DEST")
-
-          echo
-          echo "OSM size:"
-          echo "$SIZE bytes"
-
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo
-            echo "ERROR: OSM file is suspiciously small."
-            exit 1
-          fi
-
-          echo
-          echo "OSM validation passed."
-
-      # ======================================================
-      # RESTORE DEM
-      # ======================================================
-
-      - name: Restore DEM tiles
-        shell: bash
-        run: |
-          set -e
-
-          echo
-          echo "========================================"
-          echo "RESTORING DEM"
-          echo "========================================"
-
-          TILES=(
-            "N18E073"
-            "N18E074"
-            "N19E073"
-            "N19E074"
-          )
-
-          for TILE in "${TILES[@]}"; do
-
-            SOURCE="/tmp/pune-release/${TILE}.hgt.gz"
-            DEST="data/raw/dem/${TILE}.hgt.gz"
-
-            echo
-            echo "DEM: $TILE"
-
-            if [ -f "$SOURCE" ]; then
-
-              cp "$SOURCE" "$DEST"
-
-              echo "Restored:"
-              ls -lh "$DEST"
-
-            else
-
-              echo "WARNING:"
-              echo "DEM tile not found:"
-              echo "$SOURCE"
-
-            fi
-
-          done
-
-          echo
-          echo "Available DEM files:"
-          ls -lh data/raw/dem || true
-
-      # ======================================================
-      # RESTORE OPENCITY CATALOG
-      # ======================================================
-
-      - name: Restore OpenCity catalog
-        shell: bash
-        run: |
-          set -e
-
-          SOURCE="/tmp/pune-release/opencity_package_search.json"
-          DEST="data/raw/opencity/package_search.json"
-
-          echo
-          echo "========================================"
-          echo "RESTORING OPENCITY CATALOG"
-          echo "========================================"
-
-          if [ -f "$SOURCE" ]; then
-
-            cp "$SOURCE" "$DEST"
-
-            echo
-            echo "OpenCity catalog restored:"
-            ls -lh "$DEST"
-
-          else
-
-            echo
-            echo "WARNING:"
-            echo "OpenCity catalog release asset not found."
-
-            echo
-            echo "Available release assets:"
-            ls -lah /tmp/pune-release
-
-          fi
-
-      # ======================================================
-      # SHOW RAW DATA
-      # ======================================================
-
-      - name: Verify raw data
-        shell: bash
-        run: |
-          set -e
-
-          echo
-          echo "========================================"
-          echo "RAW DATA VERIFICATION"
-          echo "========================================"
-
-          echo
-          echo "OSM:"
-          ls -lh data/raw/osm
-
-          echo
-          echo "DEM:"
-          ls -lh data/raw/dem
-
-          echo
-          echo "OpenCity:"
-          ls -lh data/raw/opencity
-
-          echo
-          echo "Total raw data:"
-          du -sh data/raw
-
-      # ======================================================
-      # INSTALL PYTHON DEPENDENCIES
-      # ======================================================
-
-      - name: Install Python dependencies
-        shell: bash
-        run: |
-          set -e
-
-          python -m pip install \
-            --upgrade \
-            pip
-
-          python -m pip install \
-            -r requirements.txt
-
-          echo
-          echo "Installed Python packages:"
-          python -m pip list
-
-      # ======================================================
-      # PYTHON VALIDATION
-      # ======================================================
-
-      - name: Validate Python
-        shell: bash
-        run: |
-          set -e
-
-          echo
-          echo "========================================"
-          echo "PYTHON VALIDATION"
-          echo "========================================"
-
-          python --version
-
-          python -m py_compile \
-            processor.py
-
-          echo
-          echo "Python syntax validation passed."
-
-      # ======================================================
-      # TEST IMPORTS
-      # ======================================================
-
-      - name: Test geospatial libraries
-        shell: bash
-        run: |
-          set -e
-
-          python - <<'PY'
-          import geopandas
-          import numpy
-          import pyproj
-          import shapely
-          import requests
-          import pyrosm
-
-          print("GeoPandas:", geopandas.__version__)
-          print("NumPy:", numpy.__version__)
-          print("PyProj:", pyproj.__version__)
-          print("Shapely:", shapely.__version__)
-          print("Requests:", requests.__version__)
-          print("Pyrosm:", pyrosm.__version__)
-
-          print()
-          print("All Python geospatial imports OK.")
-          PY
-
-      # ======================================================
-      # RUN PROCESSOR
-      # ======================================================
-
-      - name: Process Pune 1km chunks
-        shell: bash
-        run: |
-          set -e
-
-          echo
-          echo "========================================"
-          echo "STARTING PUNE PROCESSING"
-          echo "========================================"
-
           python processor.py
 
-      # ======================================================
-      # SHOW RESULT
-      # ======================================================
-
-      - name: Show processed result
-        if: always()
-        shell: bash
+      - name: Show output
         run: |
-          echo
-          echo "========================================"
-          echo "PROCESSED DATA"
-          echo "========================================"
+          echo "======================================"
+          echo "OUTPUT"
+          echo "======================================"
 
-          if [ -d data/chunks ]; then
-
-            echo
-            echo "Output size:"
-            du -sh data/chunks
-
-            echo
-            echo "Chunk count:"
-            find data/chunks \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -type d \
-              | wc -l
-
-            echo
-            echo "Output files:"
-            find data/chunks \
-              -maxdepth 2 \
-              -type f \
-              | head -100
-
-          else
-
-            echo "No processed output found."
-
-          fi
-
-      # ======================================================
-      # CREATE ARCHIVE
-      # ======================================================
-
-      - name: Create processed archive
-        if: success()
-        shell: bash
-        run: |
-          set -e
+          du -sh data/chunks || true
 
           echo
-          echo "========================================"
-          echo "CREATING ARCHIVE"
-          echo "========================================"
-
-          tar \
-            -czf \
-            pune-1km-chunks.tar.gz \
-            data/chunks
+          echo "Example chunk files:"
+          find data/chunks -maxdepth 2 -type f | head -50
 
           echo
-          echo "Archive:"
-          ls -lh pune-1km-chunks.tar.gz
-
-      # ======================================================
-      # UPLOAD ARTIFACT
-      # ======================================================
+          echo "Summary:"
+          cat data/chunks/summary.json
 
       - name: Upload processed chunks
-        if: success()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: pune-1km-chunks
           path: |
+            data/chunks/
             pune-1km-chunks.tar.gz
-            data/chunks/summary.json
-            data/chunks/grid.geojson
+          if-no-files-found: error
           retention-days: 30
-
-      # ======================================================
-      # FINAL REPORT
-      # ======================================================
-
-      - name: Final report
-        if: always()
-        shell: bash
-        run: |
-          echo
-          echo "========================================"
-          echo "FINAL REPORT"
-          echo "========================================"
-
-          echo
-          echo "DISK:"
-          df -h
-
-          echo
-          echo "RAW DATA:"
-          du -sh data/raw 2>/dev/null || true
-
-          echo
-          echo "PROCESSED DATA:"
-          du -sh data/chunks 2>/dev/null || true
-
-          echo
-          echo "========================================"
-          echo "PROCESSING JOB FINISHED"
-          echo "========================================"
