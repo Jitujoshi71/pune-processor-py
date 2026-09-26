@@ -13,32 +13,62 @@ jobs:
 
     steps:
 
-      # =====================================================
-      # CHECKOUT
-      # =====================================================
-
-      - name: Checkout processor repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # =====================================================
-      # PYTHON
-      # =====================================================
+      # ------------------------------------------------------
+      # Python
+      # ------------------------------------------------------
 
-      - name: Setup Python 3.12
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements.txt
 
-      # =====================================================
-      # DISK / SYSTEM INFO
-      # =====================================================
+      # ------------------------------------------------------
+      # Install osmium-tool
+      # ------------------------------------------------------
+
+      - name: Install osmium-tool
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            osmium-tool
+
+          echo
+          echo "osmium version:"
+          osmium --version
+
+      # ------------------------------------------------------
+      # Python dependencies
+      # ------------------------------------------------------
+
+      - name: Install Python dependencies
+        run: |
+          set -e
+
+          python -m pip install --upgrade pip
+
+          pip install \
+            -r requirements.txt
+
+          echo
+          echo "Installed packages:"
+          pip list
+
+      # ------------------------------------------------------
+      # Runner information
+      # ------------------------------------------------------
 
       - name: Show runner resources
         run: |
           echo "=========================================="
-          echo "RUNNER INFORMATION"
+          echo "RUNNER"
           echo "=========================================="
 
           echo
@@ -46,94 +76,66 @@ jobs:
           nproc
 
           echo
-          echo "MEMORY:"
+          echo "RAM:"
           free -h
 
           echo
           echo "DISK:"
           df -h
 
-          echo
-          echo "PYTHON:"
-          python --version
+      # ------------------------------------------------------
+      # Download OSM
+      # ------------------------------------------------------
 
-          echo
-          echo "=========================================="
-
-      # =====================================================
-      # INSTALL PYTHON DEPENDENCIES
-      # =====================================================
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-          echo
-          echo "Installed packages:"
-          pip list
-
-      # =====================================================
-      # DOWNLOAD RAW OSM
-      # =====================================================
-
-      - name: Download Pune OSM release
+      - name: Download Pune OSM
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
-          echo "=========================================="
-          echo "DOWNLOADING RAW OSM"
-          echo "=========================================="
-
           mkdir -p raw
 
-          gh release download pune-raw-v1 \
+          echo "Downloading central-zone.osm.pbf..."
+
+          gh release download \
+            pune-raw-v1 \
             --repo Jitujoshi71/pune_raw_py \
             --pattern "central-zone.osm.pbf" \
             --dir raw
 
           echo
-          echo "Downloaded files:"
+          echo "Downloaded:"
           ls -lh raw
-
-          echo
-          echo "Disk after download:"
-          df -h
 
           test -f raw/central-zone.osm.pbf
 
           echo
-          echo "OSM file verified:"
-          ls -lh raw/central-zone.osm.pbf
+          echo "Disk:"
+          df -h
 
-      # =====================================================
-      # PROCESS
-      # =====================================================
+      # ------------------------------------------------------
+      # Process
+      # ------------------------------------------------------
 
-      - name: Process Pune OSM into 1km chunks
+      - name: Process Pune OSM
         env:
           RAW_DIR: raw
           OSM_FILE: raw/central-zone.osm.pbf
 
           OUTPUT_DIR: data/chunks
-
           TEMP_DIR: data/.processor_tmp
 
           CHUNK_SIZE_M: "1000"
 
-          # Pune processing area
           BBOX: "73.70,18.40,74.05,18.70"
 
-          # Print OSM progress every 50,000 ways
           PROGRESS_EVERY: "50000"
 
         run: |
           set -e
 
           echo "=========================================="
-          echo "STARTING PUNE PROCESSOR"
+          echo "STARTING PROCESSOR"
           echo "=========================================="
 
           echo
@@ -143,26 +145,22 @@ jobs:
           echo "TEMP_DIR=$TEMP_DIR"
           echo "CHUNK_SIZE_M=$CHUNK_SIZE_M"
           echo "BBOX=$BBOX"
-          echo "PROGRESS_EVERY=$PROGRESS_EVERY"
 
           echo
           echo "Disk before processing:"
           df -h
 
           echo
-          echo "Starting processor..."
+          echo "Starting..."
           echo
 
           python -u processor.py
 
-          echo
-          echo "Processor finished."
+      # ------------------------------------------------------
+      # Verify
+      # ------------------------------------------------------
 
-      # =====================================================
-      # VERIFY OUTPUT
-      # =====================================================
-
-      - name: Verify processed output
+      - name: Verify output
         shell: bash
         run: |
           set -e
@@ -177,11 +175,7 @@ jobs:
           test -f pune-1km-chunks.tar.gz
 
           echo
-          echo "Top-level output:"
-          ls -lah data/chunks
-
-          echo
-          echo "Chunk count:"
+          echo "Chunk directories:"
           find data/chunks \
             -mindepth 1 \
             -maxdepth 1 \
@@ -189,50 +183,46 @@ jobs:
             | wc -l
 
           echo
-          echo "Buildings GeoJSON count:"
+          echo "Buildings files:"
           find data/chunks \
-            -name "buildings.geojson" \
+            -name buildings.geojson \
             -type f \
             | wc -l
 
           echo
-          echo "Roads GeoJSON count:"
+          echo "Road files:"
           find data/chunks \
-            -name "roads.geojson" \
+            -name roads.geojson \
             -type f \
             | wc -l
 
           echo
-          echo "Waterways GeoJSON count:"
+          echo "Waterway files:"
           find data/chunks \
-            -name "waterways.geojson" \
+            -name waterways.geojson \
             -type f \
             | wc -l
 
           echo
-          echo "Metadata count:"
+          echo "Metadata files:"
           find data/chunks \
-            -name "metadata.json" \
+            -name metadata.json \
             -type f \
             | wc -l
+
+          echo
+          echo "Summary:"
+          cat data/chunks/summary.json
 
           echo
           echo "Archive:"
           ls -lh pune-1km-chunks.tar.gz
 
-          echo
-          echo "=========================================="
-          echo "SUMMARY.JSON"
-          echo "=========================================="
-
-          cat data/chunks/summary.json
-
-      # =====================================================
-      # SHOW SAMPLE CHUNK
-      # =====================================================
+      # ------------------------------------------------------
+      # Sample chunk
+      # ------------------------------------------------------
 
       - name: Inspect sample chunk
-        shell: bash
         run: |
           set -e
 
@@ -240,7 +230,7 @@ jobs:
           echo "SAMPLE CHUNK"
           echo "=========================================="
 
-          SAMPLE_CHUNK=$(
+          SAMPLE=$(
             find data/chunks \
               -mindepth 1 \
               -maxdepth 1 \
@@ -249,43 +239,38 @@ jobs:
               | head -1
           )
 
-          if [ -z "$SAMPLE_CHUNK" ]; then
-            echo "No chunk directory found."
-            exit 1
-          fi
-
           echo
-          echo "Sample:"
-          echo "$SAMPLE_CHUNK"
+          echo "Chunk:"
+          echo "$SAMPLE"
 
           echo
           echo "Files:"
-          ls -lh "$SAMPLE_CHUNK"
+          ls -lh "$SAMPLE"
 
           echo
           echo "Metadata:"
-          cat "$SAMPLE_CHUNK/metadata.json"
+          cat "$SAMPLE/metadata.json"
 
           echo
-          echo "Building file size:"
-          du -h "$SAMPLE_CHUNK/buildings.geojson"
+          echo "Building GeoJSON:"
+          wc -c "$SAMPLE/buildings.geojson"
 
           echo
-          echo "Road file size:"
-          du -h "$SAMPLE_CHUNK/roads.geojson"
+          echo "Road GeoJSON:"
+          wc -c "$SAMPLE/roads.geojson"
 
           echo
-          echo "Waterway file size:"
-          du -h "$SAMPLE_CHUNK/waterways.geojson"
+          echo "Waterway GeoJSON:"
+          wc -c "$SAMPLE/waterways.geojson"
 
-      # =====================================================
-      # FINAL DISK INFO
-      # =====================================================
+      # ------------------------------------------------------
+      # Final disk
+      # ------------------------------------------------------
 
-      - name: Show final disk usage
+      - name: Show final disk
         run: |
           echo "=========================================="
-          echo "FINAL DISK USAGE"
+          echo "FINAL DISK"
           echo "=========================================="
 
           df -h
@@ -295,14 +280,14 @@ jobs:
           du -sh data/chunks
 
           echo
-          echo "Archive size:"
+          echo "Archive:"
           du -h pune-1km-chunks.tar.gz
 
-      # =====================================================
-      # UPLOAD ARTIFACT
-      # =====================================================
+      # ------------------------------------------------------
+      # Artifact
+      # ------------------------------------------------------
 
-      - name: Upload Pune processed artifact
+      - name: Upload processed artifact
         uses: actions/upload-artifact@v4
         with:
           name: pune-1km-chunks
