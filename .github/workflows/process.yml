@@ -1,88 +1,222 @@
-      - name: Inspect actual Osmium GeoJSON
+name: Pune 1KM Processor v5
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ======================================================
+      # SHOW EXACT COMMIT
+      # ======================================================
+
+      - name: Verify repository commit
         run: |
           set -e
 
           echo "=============================================="
-          echo "BUILDINGS SAMPLE"
+          echo "REPOSITORY"
           echo "=============================================="
 
-          head -n 5 data/.processor_tmp/buildings.geojsonseq
+          echo "Commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Commit:"
+          git log -1 --oneline
+
+          echo
+          echo "Processor version:"
+          grep -n "PUNE 1KM PROCESSOR v5" processor.py
+
+      # ======================================================
+      # INSTALL OSMIUM
+      # ======================================================
+
+      - name: Install system dependencies
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            osmium-tool \
+            python3 \
+            python3-pip
+
+          echo
+          echo "OSMIUM:"
+          osmium --version
+
+          echo
+          echo "PYTHON:"
+          python3 --version
+
+      # ======================================================
+      # DOWNLOAD RAW PBF
+      # ======================================================
+
+      - name: Download raw PBF
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          mkdir -p raw
+
+          gh release download \
+            pune-raw-v1 \
+            --repo Jitujoshi71/pune_raw_py \
+            --pattern "central-zone.osm.pbf" \
+            --dir raw \
+            --clobber
+
+          test -s raw/central-zone.osm.pbf
+
+          echo
+          echo "RAW PBF:"
+          ls -lh raw/central-zone.osm.pbf
+
+      # ======================================================
+      # INSTALL PYTHON
+      # ======================================================
+
+      - name: Install Python dependencies
+        run: |
+          set -e
+
+          python3 -m pip install \
+            --upgrade \
+            pip
+
+          python3 -m pip install \
+            -r requirements.txt
+
+      # ======================================================
+      # RUN PROCESSOR
+      # ======================================================
+
+      - name: Process Pune OSM
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "STARTING PROCESSOR V5"
+          echo "=============================================="
+
+          python3 processor.py
+
+      # ======================================================
+      # VALIDATE ARTIFACT
+      # ======================================================
+
+      - name: Validate generated data
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "FINAL OUTPUT VALIDATION"
+          echo "=============================================="
+
+          test -d data/chunks
+          test -f data/grid.geojson
+          test -f data/summary.json
+          test -f pune-1km-chunks.tar.gz
+
+          CHUNKS=$(find data/chunks \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | wc -l)
+
+          BUILDINGS=$(find data/chunks \
+            -name "buildings.geojson" \
+            | wc -l)
+
+          ROADS=$(find data/chunks \
+            -name "roads.geojson" \
+            | wc -l)
+
+          WATERWAYS=$(find data/chunks \
+            -name "waterways.geojson" \
+            | wc -l)
+
+          echo
+          echo "CHUNKS: $CHUNKS"
+          echo "BUILDINGS FILES: $BUILDINGS"
+          echo "ROADS FILES: $ROADS"
+          echo "WATERWAY FILES: $WATERWAYS"
+
+          if [ "$CHUNKS" -eq 0 ]; then
+            echo "ERROR: ZERO CHUNKS"
+            exit 1
+          fi
+
+          if [ "$BUILDINGS" -eq 0 ]; then
+            echo "ERROR: ZERO BUILDING FILES"
+            exit 1
+          fi
+
+          if [ "$ROADS" -eq 0 ]; then
+            echo "ERROR: ZERO ROAD FILES"
+            exit 1
+          fi
+
+          echo
+          echo "OUTPUT VALIDATION PASSED"
+
+      # ======================================================
+      # SHOW SUMMARY
+      # ======================================================
+
+      - name: Show summary
+        run: |
+          echo "=============================================="
+          echo "SUMMARY"
+          echo "=============================================="
+
+          cat data/summary.json
 
           echo
           echo "=============================================="
-          echo "ROADS SAMPLE"
+          echo "DATA SIZE"
           echo "=============================================="
 
-          head -n 5 data/.processor_tmp/roads.geojsonseq
+          du -sh data
 
           echo
           echo "=============================================="
-          echo "WATERWAYS SAMPLE"
+          echo "SAMPLE CHUNKS"
           echo "=============================================="
 
-          head -n 5 data/.processor_tmp/waterways.geojsonseq
+          find data/chunks \
+            -maxdepth 2 \
+            -type f \
+            | head -100
 
-          echo
-          echo "=============================================="
-          echo "PYTHON GEOMETRY DIAGNOSTIC"
-          echo "=============================================="
+      # ======================================================
+      # UPLOAD ARTIFACT
+      # ======================================================
 
-          python3 - <<'PY'
-          import json
-          from shapely.geometry import shape, box
-
-          BBOX = box(73.7, 18.4, 74.05, 18.7)
-
-          files = [
-              ("BUILDINGS", "data/.processor_tmp/buildings.geojsonseq"),
-              ("ROADS", "data/.processor_tmp/roads.geojsonseq"),
-              ("WATERWAYS", "data/.processor_tmp/waterways.geojsonseq"),
-          ]
-
-          for name, filename in files:
-              print()
-              print("=" * 70)
-              print(name)
-              print("=" * 70)
-
-              with open(filename, "r", encoding="utf-8") as f:
-                  for i, line in enumerate(f):
-                      if i >= 5:
-                          break
-
-                      obj = json.loads(line)
-
-                      print()
-                      print("FEATURE:", i + 1)
-                      print("type:", obj.get("type"))
-                      print("geometry type:",
-                            (obj.get("geometry") or {}).get("type"))
-
-                      props = obj.get("properties", {})
-
-                      print("properties:")
-                      print(json.dumps(
-                          props,
-                          ensure_ascii=False,
-                          indent=2
-                      )[:3000])
-
-                      geometry = obj.get("geometry")
-
-                      if geometry:
-                          try:
-                              g = shape(geometry)
-
-                              print("bounds:", g.bounds)
-                              print("centroid:", (
-                                  g.centroid.x,
-                                  g.centroid.y
-                              ))
-                              print(
-                                  "intersects Pune:",
-                                  g.intersects(BBOX)
-                              )
-
-                          except Exception as e:
-                              print("GEOMETRY ERROR:", repr(e))
-          PY
+      - name: Upload Pune chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: pune-1km-chunks-v5
+          path: |
+            data/
+            pune-1km-chunks.tar.gz
+          if-no-files-found: error
+          retention-days: 7
