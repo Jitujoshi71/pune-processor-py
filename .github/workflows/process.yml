@@ -1,4 +1,4 @@
-name: Pune 1KM Processor v5
+name: Pune 1KM Processor v6
 
 on:
   workflow_dispatch:
@@ -20,10 +20,10 @@ jobs:
         uses: actions/checkout@v5
 
       # ======================================================
-      # SHOW EXACT COMMIT
+      # VERIFY FILES
       # ======================================================
 
-      - name: Verify repository commit
+      - name: Verify processor files
         run: |
           set -e
 
@@ -35,12 +35,31 @@ jobs:
           git rev-parse HEAD
 
           echo
-          echo "Commit:"
+          echo "Commit message:"
           git log -1 --oneline
 
           echo
-          echo "Processor version:"
-          grep -n "PUNE 1KM PROCESSOR v5" processor.py
+          echo "Repository files:"
+          ls -lah
+
+          echo
+          echo "Processor:"
+          test -f processor.py
+          ls -lh processor.py
+
+          echo
+          echo "Requirements:"
+          test -f requirements.txt
+          ls -lh requirements.txt
+
+          echo
+          echo "Workflow:"
+          test -f .github/workflows/process.yml
+          ls -lh .github/workflows/process.yml
+
+          echo
+          echo "Processor header:"
+          head -30 processor.py
 
       # ======================================================
       # INSTALL OSMIUM
@@ -91,16 +110,14 @@ jobs:
           ls -lh raw/central-zone.osm.pbf
 
       # ======================================================
-      # INSTALL PYTHON
+      # PYTHON DEPENDENCIES
       # ======================================================
 
       - name: Install Python dependencies
         run: |
           set -e
 
-          python3 -m pip install \
-            --upgrade \
-            pip
+          python3 -m pip install --upgrade pip
 
           python3 -m pip install \
             -r requirements.txt
@@ -114,13 +131,17 @@ jobs:
           set -e
 
           echo "=============================================="
-          echo "STARTING PROCESSOR V5"
+          echo "STARTING PUNE PROCESSOR"
           echo "=============================================="
+
+          python3 -m py_compile processor.py
+
+          echo "Python syntax: OK"
 
           python3 processor.py
 
       # ======================================================
-      # VALIDATE ARTIFACT
+      # VALIDATE OUTPUT
       # ======================================================
 
       - name: Validate generated data
@@ -179,7 +200,7 @@ jobs:
           echo "OUTPUT VALIDATION PASSED"
 
       # ======================================================
-      # SHOW SUMMARY
+      # SUMMARY
       # ======================================================
 
       - name: Show summary
@@ -208,13 +229,13 @@ jobs:
             | head -100
 
       # ======================================================
-      # UPLOAD ARTIFACT
+      # UPLOAD
       # ======================================================
 
       - name: Upload Pune chunks
         uses: actions/upload-artifact@v4
         with:
-          name: pune-1km-chunks-v5
+          name: pune-1km-chunks-v6
           path: |
             data/
             pune-1km-chunks.tar.gz
