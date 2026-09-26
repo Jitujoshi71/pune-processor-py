@@ -1,4 +1,4 @@
-name: Pune 1KM Processor v6
+name: Pune 1KM Processor v7
 
 on:
   workflow_dispatch:
@@ -12,60 +12,35 @@ jobs:
 
     steps:
 
-      # ======================================================
-      # CHECKOUT
-      # ======================================================
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v5
 
-      # ======================================================
-      # VERIFY FILES
-      # ======================================================
-
-      - name: Verify processor files
+      - name: Verify source
         run: |
           set -e
 
           echo "=============================================="
-          echo "REPOSITORY"
+          echo "COMMIT"
           echo "=============================================="
 
-          echo "Commit:"
           git rev-parse HEAD
-
-          echo
-          echo "Commit message:"
           git log -1 --oneline
 
           echo
-          echo "Repository files:"
-          ls -lah
-
-          echo
-          echo "Processor:"
+          echo "PROCESSOR:"
           test -f processor.py
-          ls -lh processor.py
+          head -20 processor.py
 
           echo
-          echo "Requirements:"
-          test -f requirements.txt
-          ls -lh requirements.txt
+          echo "CHECKING FOR OLD EXTRACT COMMAND:"
+          if grep -nE 'osmium[[:space:]]+extract' processor.py; then
+            echo "ERROR: old extract command found"
+            exit 1
+          fi
 
-          echo
-          echo "Workflow:"
-          test -f .github/workflows/process.yml
-          ls -lh .github/workflows/process.yml
+          echo "No osmium extract command in processor.py"
 
-          echo
-          echo "Processor header:"
-          head -30 processor.py
-
-      # ======================================================
-      # INSTALL OSMIUM
-      # ======================================================
-
-      - name: Install system dependencies
+      - name: Install system packages
         run: |
           set -e
 
@@ -77,16 +52,8 @@ jobs:
             python3-pip
 
           echo
-          echo "OSMIUM:"
           osmium --version
-
-          echo
-          echo "PYTHON:"
           python3 --version
-
-      # ======================================================
-      # DOWNLOAD RAW PBF
-      # ======================================================
 
       - name: Download raw PBF
         env:
@@ -105,57 +72,44 @@ jobs:
 
           test -s raw/central-zone.osm.pbf
 
-          echo
-          echo "RAW PBF:"
           ls -lh raw/central-zone.osm.pbf
-
-      # ======================================================
-      # PYTHON DEPENDENCIES
-      # ======================================================
 
       - name: Install Python dependencies
         run: |
           set -e
 
-          python3 -m pip install --upgrade pip
+          python3 -m pip install \
+            --upgrade pip
 
           python3 -m pip install \
             -r requirements.txt
 
-      # ======================================================
-      # RUN PROCESSOR
-      # ======================================================
-
-      - name: Process Pune OSM
+      - name: Syntax check
         run: |
           set -e
-
-          echo "=============================================="
-          echo "STARTING PUNE PROCESSOR"
-          echo "=============================================="
 
           python3 -m py_compile processor.py
 
-          echo "Python syntax: OK"
+          echo "Python syntax OK"
+
+      - name: Run processor
+        run: |
+          set -e
 
           python3 processor.py
 
-      # ======================================================
-      # VALIDATE OUTPUT
-      # ======================================================
-
-      - name: Validate generated data
+      - name: Validate output
         run: |
           set -e
 
           echo "=============================================="
-          echo "FINAL OUTPUT VALIDATION"
+          echo "OUTPUT VALIDATION"
           echo "=============================================="
 
           test -d data/chunks
           test -f data/grid.geojson
           test -f data/summary.json
-          test -f pune-1km-chunks.tar.gz
+          test -s pune-1km-chunks.tar.gz
 
           CHUNKS=$(find data/chunks \
             -mindepth 1 \
@@ -175,33 +129,17 @@ jobs:
             -name "waterways.geojson" \
             | wc -l)
 
-          echo
           echo "CHUNKS: $CHUNKS"
-          echo "BUILDINGS FILES: $BUILDINGS"
-          echo "ROADS FILES: $ROADS"
-          echo "WATERWAY FILES: $WATERWAYS"
+          echo "BUILDINGS: $BUILDINGS"
+          echo "ROADS: $ROADS"
+          echo "WATERWAYS: $WATERWAYS"
 
-          if [ "$CHUNKS" -eq 0 ]; then
-            echo "ERROR: ZERO CHUNKS"
-            exit 1
-          fi
-
-          if [ "$BUILDINGS" -eq 0 ]; then
-            echo "ERROR: ZERO BUILDING FILES"
-            exit 1
-          fi
-
-          if [ "$ROADS" -eq 0 ]; then
-            echo "ERROR: ZERO ROAD FILES"
-            exit 1
-          fi
+          test "$CHUNKS" -gt 0
+          test "$BUILDINGS" -gt 0
+          test "$ROADS" -gt 0
 
           echo
-          echo "OUTPUT VALIDATION PASSED"
-
-      # ======================================================
-      # SUMMARY
-      # ======================================================
+          echo "VALIDATION PASSED"
 
       - name: Show summary
         run: |
@@ -212,30 +150,20 @@ jobs:
           cat data/summary.json
 
           echo
-          echo "=============================================="
-          echo "DATA SIZE"
-          echo "=============================================="
-
+          echo "DATA SIZE:"
           du -sh data
 
           echo
-          echo "=============================================="
-          echo "SAMPLE CHUNKS"
-          echo "=============================================="
-
+          echo "SAMPLE:"
           find data/chunks \
             -maxdepth 2 \
             -type f \
             | head -100
 
-      # ======================================================
-      # UPLOAD
-      # ======================================================
-
-      - name: Upload Pune chunks
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pune-1km-chunks-v6
+          name: pune-1km-chunks-v7
           path: |
             data/
             pune-1km-chunks.tar.gz
