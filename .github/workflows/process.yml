@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout processor
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download Pune raw release
+      - name: Download OSM
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -35,40 +35,48 @@ jobs:
             --pattern "central-zone.osm.pbf" \
             --dir raw
 
-          echo "Downloaded files:"
           ls -lh raw
 
-      - name: Run processor
+      - name: Process Pune
         env:
           RAW_DIR: raw
           OSM_FILE: raw/central-zone.osm.pbf
-
-          # Pune-wide processing area
-          BBOX: "73.70,18.40,74.05,18.70"
-
+          OUTPUT_DIR: data/chunks
           CHUNK_SIZE_M: "1000"
-          OUTPUT_DIR: "data/chunks"
-
+          BBOX: "73.70,18.40,74.05,18.70"
         run: |
           python processor.py
 
-      - name: Show output
+      - name: Verify output
         run: |
-          echo "======================================"
-          echo "OUTPUT"
-          echo "======================================"
+          echo "========================================"
+          echo "VERIFYING OUTPUT"
+          echo "========================================"
 
-          du -sh data/chunks || true
+          test -f data/chunks/grid.geojson
+          test -f data/chunks/summary.json
 
           echo
-          echo "Example chunk files:"
-          find data/chunks -maxdepth 2 -type f | head -50
+          echo "Chunk count:"
+          find data/chunks -mindepth 1 -maxdepth 1 -type d | wc -l
+
+          echo
+          echo "Buildings files:"
+          find data/chunks -name buildings.geojson | wc -l
+
+          echo
+          echo "Road files:"
+          find data/chunks -name roads.geojson | wc -l
+
+          echo
+          echo "Waterway files:"
+          find data/chunks -name waterways.geojson | wc -l
 
           echo
           echo "Summary:"
           cat data/chunks/summary.json
 
-      - name: Upload processed chunks
+      - name: Upload processed artifact
         uses: actions/upload-artifact@v4
         with:
           name: pune-1km-chunks
