@@ -1,0 +1,247 @@
+name: Process Pune 1km Chunks
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  process:
+    name: Process Pune Raw Data
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 350
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # ======================================================
+      # SYSTEM INFO
+      # ======================================================
+
+      - name: System information
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "PUNE CHUNK PROCESSOR"
+          echo "========================================"
+
+          echo
+          echo "CPU:"
+          nproc
+
+          echo
+          echo "RAM:"
+          free -h
+
+          echo
+          echo "DISK:"
+          df -h
+
+      # ======================================================
+      # DOWNLOAD RAW RELEASE
+      # ======================================================
+
+      - name: Download raw data
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          mkdir -p data/raw
+
+          echo "Downloading raw Pune release..."
+
+          gh release download \
+            pune-raw-v1 \
+            --dir /tmp/pune-release \
+            --clobber
+
+          mkdir -p data/raw/osm
+          mkdir -p data/raw/dem
+          mkdir -p data/raw/opencity
+
+          echo
+          echo "Release assets:"
+          ls -lh /tmp/pune-release
+
+      # ======================================================
+      # RESTORE OSM
+      # ======================================================
+
+      - name: Restore OSM
+        shell: bash
+        run: |
+          set -e
+
+          FILE="/tmp/pune-release/central-zone.osm.pbf"
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: OSM asset not found."
+            exit 1
+          fi
+
+          cp \
+            "$FILE" \
+            data/raw/osm/central-zone.osm.pbf
+
+          ls -lh \
+            data/raw/osm/central-zone.osm.pbf
+
+      # ======================================================
+      # RESTORE DEM
+      # ======================================================
+
+      - name: Restore DEM
+        shell: bash
+        run: |
+          set -e
+
+          for TILE in \
+            N18E073 \
+            N18E074 \
+            N19E073 \
+            N19E074
+          do
+
+            FILE="/tmp/pune-release/${TILE}.hgt.gz"
+
+            if [ -f "$FILE" ]; then
+
+              cp \
+                "$FILE" \
+                "data/raw/dem/${TILE}.hgt.gz"
+
+              echo "Restored:"
+              ls -lh \
+                "data/raw/dem/${TILE}.hgt.gz"
+
+            else
+
+              echo "WARNING:"
+              echo "DEM tile missing: $TILE"
+
+            fi
+
+          done
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+
+          python -m pip install \
+            --upgrade \
+            pip
+
+          python -m pip install \
+            -r requirements.txt
+
+      # ======================================================
+      # VALIDATE PYTHON
+      # ======================================================
+
+      - name: Validate Python
+        shell: bash
+        run: |
+          set -e
+
+          python -m py_compile \
+            processor.py
+
+          echo "Python syntax OK."
+
+      # ======================================================
+      # RUN PROCESSOR
+      # ======================================================
+
+      - name: Process Pune
+        shell: bash
+        run: |
+          set -e
+
+          python processor.py
+
+      # ======================================================
+      # ZIP RESULT
+      # ======================================================
+
+      - name: Create processed archive
+        shell: bash
+        run: |
+          set -e
+
+          tar \
+            -czf \
+            pune-1km-chunks.tar.gz \
+            data/chunks
+
+          ls -lh \
+            pune-1km-chunks.tar.gz
+
+      # ======================================================
+      # UPLOAD ARTIFACT
+      # ======================================================
+
+      - name: Upload processed chunks
+        uses: actions/upload-artifact@v5
+        with:
+          name: pune-1km-chunks
+          path: |
+            pune-1km-chunks.tar.gz
+            data/chunks/summary.json
+            data/chunks/grid.geojson
+          retention-days: 30
+
+      # ======================================================
+      # FINAL REPORT
+      # ======================================================
+
+      - name: Final report
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "========================================"
+          echo "FINAL REPORT"
+          echo "========================================"
+
+          df -h
+
+          echo
+          echo "Chunk count:"
+
+          if [ -f data/chunks/summary.json ]; then
+            python - <<'PY'
+          import json
+
+          with open("data/chunks/summary.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          print(data)
+          PY
+          fi
+
+          echo
+          echo "Output:"
+          du -sh data/chunks 2>/dev/null || true
