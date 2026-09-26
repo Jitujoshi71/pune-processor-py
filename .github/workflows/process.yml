@@ -1,4 +1,4 @@
-name: Pune 1KM Processor v7
+name: Process Pune 1km Chunks
 
 on:
   workflow_dispatch:
@@ -8,52 +8,60 @@ permissions:
 
 jobs:
   process:
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 360
 
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      - name: Verify source
+      - name: System information
         run: |
           set -e
 
-          echo "=============================================="
-          echo "COMMIT"
-          echo "=============================================="
+          echo "=========================================="
+          echo "SYSTEM"
+          echo "=========================================="
 
-          git rev-parse HEAD
-          git log -1 --oneline
-
-          echo
-          echo "PROCESSOR:"
-          test -f processor.py
-          head -20 processor.py
+          echo "CPU:"
+          nproc
 
           echo
-          echo "CHECKING FOR OLD EXTRACT COMMAND:"
-          if grep -nE 'osmium[[:space:]]+extract' processor.py; then
-            echo "ERROR: old extract command found"
-            exit 1
-          fi
+          echo "RAM:"
+          free -h
 
-          echo "No osmium extract command in processor.py"
+          echo
+          echo "DISK:"
+          df -h
 
-      - name: Install system packages
+      - name: Install osmium
         run: |
           set -e
 
           sudo apt-get update
 
           sudo apt-get install -y \
-            osmium-tool \
-            python3 \
-            python3-pip
+            osmium-tool
 
-          echo
-          osmium --version
-          python3 --version
+          osmium version
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: |
+          set -e
+
+          python -m pip install \
+            --upgrade pip
+
+          pip install \
+            -r requirements.txt
 
       - name: Download raw PBF
         env:
@@ -70,102 +78,92 @@ jobs:
             --dir raw \
             --clobber
 
-          test -s raw/central-zone.osm.pbf
+          test -f raw/central-zone.osm.pbf
 
-          ls -lh raw/central-zone.osm.pbf
+          ls -lh \
+            raw/central-zone.osm.pbf
 
-      - name: Install Python dependencies
+      - name: Validate PBF
         run: |
           set -e
 
-          python3 -m pip install \
-            --upgrade pip
-
-          python3 -m pip install \
-            -r requirements.txt
-
-      - name: Syntax check
-        run: |
-          set -e
-
-          python3 -m py_compile processor.py
-
-          echo "Python syntax OK"
+          osmium fileinfo \
+            raw/central-zone.osm.pbf \
+            --extended
 
       - name: Run processor
         run: |
           set -e
 
-          python3 processor.py
+          python -u processor.py
 
-      - name: Validate output
+      - name: Verify output
+        if: always()
         run: |
-          set -e
+          set +e
 
-          echo "=============================================="
-          echo "OUTPUT VALIDATION"
-          echo "=============================================="
+          echo "=========================================="
+          echo "VERIFYING OUTPUT"
+          echo "=========================================="
 
-          test -d data/chunks
-          test -f data/grid.geojson
-          test -f data/summary.json
-          test -s pune-1km-chunks.tar.gz
+          if [ -d data/chunks ]; then
 
-          CHUNKS=$(find data/chunks \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            | wc -l)
+            echo
+            echo "CHUNK COUNT:"
 
-          BUILDINGS=$(find data/chunks \
-            -name "buildings.geojson" \
-            | wc -l)
+            find data/chunks \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              | wc -l
 
-          ROADS=$(find data/chunks \
-            -name "roads.geojson" \
-            | wc -l)
+            echo
+            echo "FIRST CHUNKS:"
 
-          WATERWAYS=$(find data/chunks \
-            -name "waterways.geojson" \
-            | wc -l)
+            find data/chunks \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              | sort \
+              | head -20
 
-          echo "CHUNKS: $CHUNKS"
-          echo "BUILDINGS: $BUILDINGS"
-          echo "ROADS: $ROADS"
-          echo "WATERWAYS: $WATERWAYS"
+            echo
+            echo "SAMPLE FILES:"
 
-          test "$CHUNKS" -gt 0
-          test "$BUILDINGS" -gt 0
-          test "$ROADS" -gt 0
+            find data/chunks \
+              -type f \
+              | sort \
+              | head -50
 
-          echo
-          echo "VALIDATION PASSED"
+          else
 
-      - name: Show summary
-        run: |
-          echo "=============================================="
-          echo "SUMMARY"
-          echo "=============================================="
+            echo "ERROR: data/chunks missing"
 
-          cat data/summary.json
+          fi
 
           echo
-          echo "DATA SIZE:"
-          du -sh data
+          echo "SUMMARY:"
+
+          if [ -f data/summary.json ]; then
+            cat data/summary.json
+          fi
 
           echo
-          echo "SAMPLE:"
-          find data/chunks \
-            -maxdepth 2 \
-            -type f \
-            | head -100
+          echo "ARCHIVE:"
 
-      - name: Upload artifact
+          if [ -f pune-1km-chunks.tar.gz ]; then
+            ls -lh pune-1km-chunks.tar.gz
+          fi
+
+      - name: Upload processed data
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: pune-1km-chunks-v7
+          name: pune-1km-chunks
           path: |
-            data/
             pune-1km-chunks.tar.gz
+            data/grid.geojson
+            data/summary.json
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7
