@@ -1,0 +1,6 @@
+geopandas>=1.0,<2
+numpy>=2.0,<3
+pyproj>=3.6,<4
+requests>=2.32,<3
+shapely>=2.0,<3
+pyrosm>=0.6,<1
