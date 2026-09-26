@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -12,20 +11,12 @@ from shapely.geometry import box, shape, mapping
 
 
 # ============================================================
-# PUNE PROCESSOR v5
+# PUNE PROCESSOR v7
 # ============================================================
 
-VERSION = "v5"
-
-# ------------------------------------------------------------
-# Source
-# ------------------------------------------------------------
+VERSION = "v7"
 
 RAW_PBF = Path("raw/central-zone.osm.pbf")
-
-# ------------------------------------------------------------
-# Output
-# ------------------------------------------------------------
 
 DATA_DIR = Path("data")
 TMP_DIR = DATA_DIR / ".processor_tmp"
@@ -33,27 +24,29 @@ CHUNKS_DIR = DATA_DIR / "chunks"
 
 ARCHIVE = Path("pune-1km-chunks.tar.gz")
 
-# ------------------------------------------------------------
-# Pune geographic extent
-# ------------------------------------------------------------
+# ============================================================
+# PUNE BBOX
+# ============================================================
 
 MIN_LON = 73.70
 MIN_LAT = 18.40
 MAX_LON = 74.05
 MAX_LAT = 18.70
 
-# Approximately 1 km at Pune latitude.
-# We keep the existing 0.01 degree grid requested.
 CHUNK_SIZE_DEG = 0.01
-
-# ------------------------------------------------------------
-# Safety
-# ------------------------------------------------------------
 
 MAX_OPEN_FILES = 48
 
+PUNE_BOX = box(
+    MIN_LON,
+    MIN_LAT,
+    MAX_LON,
+    MAX_LAT
+)
+
+
 # ============================================================
-# OSM FILTERS
+# COMMANDS
 # ============================================================
 
 BUILDING_FILTERS = [
@@ -71,16 +64,16 @@ WATERWAY_FILTERS = [
     "r/waterway",
 ]
 
-# ============================================================
-# HELPERS
-# ============================================================
 
+# ============================================================
+# BASIC HELPERS
+# ============================================================
 
 def log(message=""):
     print(message, flush=True)
 
 
-def run(cmd, cwd=None):
+def run(cmd):
     cmd = [str(x) for x in cmd]
 
     log()
@@ -90,24 +83,17 @@ def run(cmd, cwd=None):
 
     result = subprocess.run(
         cmd,
-        cwd=cwd,
-        stdout=None,
-        stderr=None,
-        text=True,
+        text=True
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            "Command failed with exit code "
-            f"{result.returncode}: {' '.join(cmd)}"
+            f"Command failed ({result.returncode}): "
+            + " ".join(cmd)
         )
 
-    return result
 
-
-def require_nonempty_file(path: Path, label=None):
-    label = label or str(path)
-
+def require_file(path, label):
     if not path.exists():
         raise RuntimeError(
             f"{label} does not exist: {path}"
@@ -115,19 +101,15 @@ def require_nonempty_file(path: Path, label=None):
 
     size = path.stat().st_size
 
-    if size <= 0:
+    if size == 0:
         raise RuntimeError(
-            f"{label} is EMPTY: {path}"
+            f"{label} is empty: {path}"
         )
 
     return size
 
 
-def file_mb(path: Path):
-    return path.stat().st_size / 1024 / 1024
-
-
-def write_json(path: Path, data):
+def write_json(path, data):
     path.parent.mkdir(
         parents=True,
         exist_ok=True
@@ -150,30 +132,26 @@ def write_json(path: Path, data):
 # GRID
 # ============================================================
 
-
 def create_grid():
-    log()
-    log("=" * 70)
-    log("CREATING 1KM GRID")
-    log("=" * 70)
 
     columns = int(
         round(
-            (MAX_LON - MIN_LON) /
-            CHUNK_SIZE_DEG
+            (MAX_LON - MIN_LON)
+            / CHUNK_SIZE_DEG
         )
     )
 
     rows = int(
         round(
-            (MAX_LAT - MIN_LAT) /
-            CHUNK_SIZE_DEG
+            (MAX_LAT - MIN_LAT)
+            / CHUNK_SIZE_DEG
         )
     )
 
     features = []
 
     for x in range(columns):
+
         for y in range(rows):
 
             minx = (
@@ -196,131 +174,69 @@ def create_grid():
                 MAX_LAT
             )
 
-            name = f"PUNE_{x:04d}_{y:04d}"
-
             features.append({
                 "type": "Feature",
+
                 "properties": {
-                    "chunk": name,
+                    "chunk":
+                        f"PUNE_{x:04d}_{y:04d}",
                     "x": x,
-                    "y": y,
+                    "y": y
                 },
+
                 "geometry": {
                     "type": "Polygon",
+
                     "coordinates": [[
                         [minx, miny],
                         [maxx, miny],
                         [maxx, maxy],
                         [minx, maxy],
-                        [minx, miny],
+                        [minx, miny]
                     ]]
                 }
             })
 
-    grid = {
-        "type": "FeatureCollection",
-        "features": features
-    }
-
     write_json(
         DATA_DIR / "grid.geojson",
-        grid
+        {
+            "type":
+                "FeatureCollection",
+            "features":
+                features
+        }
     )
 
+    log()
+    log("=" * 70)
+    log("GRID")
+    log("=" * 70)
     log(
-        f"Grid: {columns} x {rows} = "
-        f"{len(features):,} chunks"
+        f"Columns: {columns}"
+    )
+    log(
+        f"Rows: {rows}"
+    )
+    log(
+        f"Total: {len(features):,}"
     )
 
     return columns, rows
 
 
 # ============================================================
-# PUNE EXTRACT
+# FILTER RAW PBF DIRECTLY
 # ============================================================
 
-
-def create_pune_extract():
-    """
-    Create a geographically clipped PBF first.
-
-    IMPORTANT:
-    Correct osmium syntax:
-
-        osmium extract
-        --bbox LEFT,BOTTOM,RIGHT,TOP
-        INPUT
-        -o OUTPUT
-    """
-
-    log()
-    log("=" * 70)
-    log("CREATING PUNE GEOGRAPHIC EXTRACT")
-    log("=" * 70)
-
-    output = TMP_DIR / "pune.osm.pbf"
-
-    if output.exists():
-        output.unlink()
-
-    bbox = (
-        f"{MIN_LON},"
-        f"{MIN_LAT},"
-        f"{MAX_LON},"
-        f"{MAX_LAT}"
-    )
-
-    run([
-        "osmium",
-        "extract",
-        "--bbox",
-        bbox,
-        str(RAW_PBF),
-        "-o",
-        str(output),
-        "--overwrite",
-    ])
-
-    size = require_nonempty_file(
-        output,
-        "Pune PBF"
-    )
-
-    log(
-        f"Pune PBF size: "
-        f"{size / 1024 / 1024:.2f} MB"
-    )
-
-    # --------------------------------------------------------
-    # File information
-    # --------------------------------------------------------
-
-    run([
-        "osmium",
-        "fileinfo",
-        "--extended",
-        str(output),
-    ])
-
-    return output
-
-
-# ============================================================
-# FILTER
-# ============================================================
-
-
-def create_filtered_pbf(
-    pune_pbf: Path,
-    name: str,
-    expressions,
+def filter_pbf(
+    name,
+    expressions
 ):
-    log()
-    log("=" * 70)
-    log(f"FILTER {name.upper()}")
-    log("=" * 70)
 
-    output = TMP_DIR / f"{name}.osm.pbf"
+    output = (
+        TMP_DIR /
+        f"{name}.osm.pbf"
+    )
 
     if output.exists():
         output.unlink()
@@ -328,7 +244,7 @@ def create_filtered_pbf(
     cmd = [
         "osmium",
         "tags-filter",
-        str(pune_pbf),
+        str(RAW_PBF),
     ]
 
     cmd.extend(expressions)
@@ -336,18 +252,18 @@ def create_filtered_pbf(
     cmd.extend([
         "-o",
         str(output),
-        "--overwrite",
+        "--overwrite"
     ])
 
     run(cmd)
 
-    size = require_nonempty_file(
+    size = require_file(
         output,
         f"{name} filtered PBF"
     )
 
     log(
-        f"{name} PBF: "
+        f"{name} size: "
         f"{size / 1024 / 1024:.2f} MB"
     )
 
@@ -358,15 +274,10 @@ def create_filtered_pbf(
 # EXPORT
 # ============================================================
 
-
-def export_geojsonseq(
-    pbf: Path,
-    name: str
+def export_pbf(
+    pbf,
+    name
 ):
-    log()
-    log("=" * 70)
-    log(f"EXPORT {name.upper()}")
-    log("=" * 70)
 
     output = (
         TMP_DIR /
@@ -381,19 +292,18 @@ def export_geojsonseq(
         "export",
         str(pbf),
         "--output-format=geojsonseq",
-        "--format-option=print_record_separator=false",
         "-o",
         str(output),
-        "--overwrite",
+        "--overwrite"
     ])
 
-    size = require_nonempty_file(
+    size = require_file(
         output,
         f"{name} GeoJSONSeq"
     )
 
     log(
-        f"{name} GeoJSONSeq: "
+        f"{name} GeoJSONSeq size: "
         f"{size / 1024 / 1024:.2f} MB"
     )
 
@@ -401,24 +311,17 @@ def export_geojsonseq(
 
 
 # ============================================================
-# FEATURE READER
+# GEOJSONSEQ PARSER
 # ============================================================
 
-
-def read_geojsonseq_line(line):
-    """
-    GeoJSON Text Sequence can contain:
-      - normal newline separated JSON
-      - RS (0x1e) record separators
-
-    Handle both safely.
-    """
+def parse_line(line):
 
     line = line.strip()
 
     if not line:
         return None
 
+    # GeoJSON Sequence record separator
     if line.startswith("\x1e"):
         line = line[1:].lstrip()
 
@@ -429,55 +332,269 @@ def read_geojsonseq_line(line):
 
 
 # ============================================================
-# LRU WRITER
+# DIAGNOSTIC
 # ============================================================
 
+def diagnostic(
+    path,
+    name
+):
+
+    log()
+    log("=" * 70)
+    log(
+        f"DIAGNOSTIC: {name.upper()}"
+    )
+    log("=" * 70)
+
+    total = 0
+    valid = 0
+    intersects = 0
+
+    min_seen_lon = None
+    max_seen_lon = None
+    min_seen_lat = None
+    max_seen_lat = None
+
+    with open(
+        path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        for line in f:
+
+            if total >= 10:
+                break
+
+            try:
+                feature = parse_line(
+                    line
+                )
+            except Exception as e:
+                log(
+                    "JSON error:",
+                    e
+                )
+                continue
+
+            if feature is None:
+                continue
+
+            total += 1
+
+            geometry = feature.get(
+                "geometry"
+            )
+
+            properties = feature.get(
+                "properties",
+                {}
+            )
+
+            log()
+            log(
+                f"FEATURE {total}"
+            )
+
+            log(
+                "Geometry:",
+                geometry.get("type")
+                if geometry
+                else None
+            )
+
+            if geometry:
+
+                try:
+
+                    geom = shape(
+                        geometry
+                    )
+
+                    valid += 1
+
+                    bounds = geom.bounds
+
+                    log(
+                        "Bounds:",
+                        tuple(
+                            round(
+                                float(v),
+                                6
+                            )
+                            for v in bounds
+                        )
+                    )
+
+                    log(
+                        "Centroid:",
+                        (
+                            round(
+                                geom.centroid.x,
+                                6
+                            ),
+                            round(
+                                geom.centroid.y,
+                                6
+                            )
+                        )
+                    )
+
+                    if geom.intersects(
+                        PUNE_BOX
+                    ):
+                        intersects += 1
+
+                    min_lon, min_lat, max_lon, max_lat = bounds
+
+                    if min_seen_lon is None:
+                        min_seen_lon = min_lon
+                        max_seen_lon = max_lon
+                        min_seen_lat = min_lat
+                        max_seen_lat = max_lat
+                    else:
+                        min_seen_lon = min(
+                            min_seen_lon,
+                            min_lon
+                        )
+                        max_seen_lon = max(
+                            max_seen_lon,
+                            max_lon
+                        )
+                        min_seen_lat = min(
+                            min_seen_lat,
+                            min_lat
+                        )
+                        max_seen_lat = max(
+                            max_seen_lat,
+                            max_lat
+                        )
+
+                except Exception as e:
+
+                    log(
+                        "Geometry error:",
+                        repr(e)
+                    )
+
+            log(
+                "building:",
+                properties.get(
+                    "building"
+                )
+            )
+
+            log(
+                "highway:",
+                properties.get(
+                    "highway"
+                )
+            )
+
+            log(
+                "waterway:",
+                properties.get(
+                    "waterway"
+                )
+            )
+
+    log()
+    log(
+        f"Sampled: {total}"
+    )
+
+    log(
+        f"Valid: {valid}"
+    )
+
+    log(
+        f"Intersects Pune: {intersects}"
+    )
+
+    if min_seen_lon is not None:
+
+        log()
+        log(
+            "Sample coordinate range:"
+        )
+
+        log(
+            f"Longitude: "
+            f"{min_seen_lon:.6f} -> "
+            f"{max_seen_lon:.6f}"
+        )
+
+        log(
+            f"Latitude: "
+            f"{min_seen_lat:.6f} -> "
+            f"{max_seen_lat:.6f}"
+        )
+
+    return {
+        "sampled":
+            total,
+        "valid":
+            valid,
+        "intersects":
+            intersects
+    }
+
+
+# ============================================================
+# LRU CHUNK WRITER
+# ============================================================
 
 class ChunkWriter:
 
     def __init__(
         self,
-        root: Path,
+        root,
         max_open=48
     ):
+
         self.root = root
         self.max_open = max_open
 
         self.handles = OrderedDict()
 
-        self.created_chunks = set()
-
-    def _open(
+    def get_handle(
         self,
-        chunk_name,
+        chunk,
         feature_type
     ):
+
         key = (
-            chunk_name,
+            chunk,
             feature_type
         )
 
         if key in self.handles:
 
-            fh = self.handles.pop(key)
+            fh = self.handles.pop(
+                key
+            )
 
             self.handles[key] = fh
 
             return fh
 
-        if len(self.handles) >= self.max_open:
+        if (
+            len(self.handles)
+            >= self.max_open
+        ):
 
-            old_key, old_handle = (
+            old_key, old_fh = (
                 self.handles.popitem(
                     last=False
                 )
             )
 
-            old_handle.close()
+            old_fh.close()
 
         chunk_dir = (
             self.root /
-            chunk_name
+            chunk
         )
 
         chunk_dir.mkdir(
@@ -498,20 +615,17 @@ class ChunkWriter:
 
         self.handles[key] = fh
 
-        self.created_chunks.add(
-            chunk_name
-        )
-
         return fh
 
     def write(
         self,
-        chunk_name,
+        chunk,
         feature_type,
         feature
     ):
-        fh = self._open(
-            chunk_name,
+
+        fh = self.get_handle(
+            chunk,
             feature_type
         )
 
@@ -519,14 +633,19 @@ class ChunkWriter:
             json.dumps(
                 feature,
                 ensure_ascii=False,
-                separators=(",", ":")
+                separators=(
+                    ",",
+                    ":"
+                )
             )
         )
 
         fh.write("\n")
 
     def close(self):
+
         for fh in self.handles.values():
+
             try:
                 fh.close()
             except Exception:
@@ -536,17 +655,22 @@ class ChunkWriter:
 
 
 # ============================================================
-# CHUNK CALCULATION
+# CHUNK HELPERS
 # ============================================================
 
+def chunk_name(
+    x,
+    y
+):
+    return (
+        f"PUNE_{x:04d}_{y:04d}"
+    )
 
-def chunk_name(x, y):
-    return f"PUNE_{x:04d}_{y:04d}"
 
-
-def chunk_indices_for_geometry(
+def geometry_chunks(
     geom
 ):
+
     if geom.is_empty:
         return []
 
@@ -554,15 +678,17 @@ def chunk_indices_for_geometry(
         geom.bounds
     )
 
-    # Clamp to Pune
+    if (
+        maxx < MIN_LON or
+        minx > MAX_LON or
+        maxy < MIN_LAT or
+        miny > MAX_LAT
+    ):
+        return []
+
     minx = max(
         minx,
         MIN_LON
-    )
-
-    miny = max(
-        miny,
-        MIN_LAT
     )
 
     maxx = min(
@@ -570,46 +696,48 @@ def chunk_indices_for_geometry(
         MAX_LON
     )
 
+    miny = max(
+        miny,
+        MIN_LAT
+    )
+
     maxy = min(
         maxy,
         MAX_LAT
     )
 
-    if minx >= maxx or miny >= maxy:
-        return []
-
     columns = int(
         round(
-            (MAX_LON - MIN_LON) /
-            CHUNK_SIZE_DEG
+            (MAX_LON - MIN_LON)
+            / CHUNK_SIZE_DEG
         )
     )
 
     rows = int(
         round(
-            (MAX_LAT - MIN_LAT) /
-            CHUNK_SIZE_DEG
+            (MAX_LAT - MIN_LAT)
+            / CHUNK_SIZE_DEG
         )
     )
 
     x0 = int(
-        (minx - MIN_LON) /
-        CHUNK_SIZE_DEG
-    )
-
-    y0 = int(
-        (miny - MIN_LAT) /
-        CHUNK_SIZE_DEG
+        (minx - MIN_LON)
+        / CHUNK_SIZE_DEG
     )
 
     x1 = int(
-        (maxx - MIN_LON) /
-        CHUNK_SIZE_DEG
+        (maxx - MIN_LON)
+        / CHUNK_SIZE_DEG
+    )
+
+    y0 = int(
+        (miny - MIN_LAT)
+        / CHUNK_SIZE_DEG
     )
 
     y1 = int(
-        (maxy - MIN_LAT) /
-        CHUNK_SIZE_DEG
+        (maxy - MIN_LAT)
+        / CHUNK_SIZE_DEG
     )
 
     x0 = max(
@@ -650,22 +778,28 @@ def chunk_indices_for_geometry(
         x0,
         x1 + 1
     ):
+
         for y in range(
             y0,
             y1 + 1
         ):
+
             result.append(
-                (x, y)
+                (
+                    x,
+                    y
+                )
             )
 
     return result
 
 
-def clip_to_chunk(
+def clip_geometry(
     geom,
     x,
     y
 ):
+
     minx = (
         MIN_LON +
         x * CHUNK_SIZE_DEG
@@ -693,7 +827,9 @@ def clip_to_chunk(
         maxy
     )
 
-    if not geom.intersects(tile):
+    if not geom.intersects(
+        tile
+    ):
         return None
 
     clipped = geom.intersection(
@@ -707,224 +843,21 @@ def clip_to_chunk(
 
 
 # ============================================================
-# SAMPLE DIAGNOSTIC
+# PROCESS
 # ============================================================
 
-
-def diagnostic_sample(
-    path: Path,
-    name: str,
-    count=5
+def process_file(
+    path,
+    feature_type,
+    writer
 ):
-    log()
-    log("=" * 70)
-    log(f"DIAGNOSTIC SAMPLE: {name.upper()}")
-    log("=" * 70)
 
-    pune_box = box(
-        MIN_LON,
-        MIN_LAT,
-        MAX_LON,
-        MAX_LAT
-    )
-
-    total = 0
-    valid = 0
-    intersects = 0
-
-    with open(
-        path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        for line in f:
-
-            if total >= count:
-                break
-
-            try:
-                feature = (
-                    read_geojsonseq_line(
-                        line
-                    )
-                )
-
-                if feature is None:
-                    continue
-
-                total += 1
-
-                geometry_json = (
-                    feature.get(
-                        "geometry"
-                    )
-                )
-
-                properties = (
-                    feature.get(
-                        "properties",
-                        {}
-                    )
-                )
-
-                log()
-                log(
-                    f"FEATURE #{total}"
-                )
-
-                log(
-                    "Geometry type: "
-                    + str(
-                        (
-                            geometry_json or {}
-                        ).get(
-                            "type"
-                        )
-                    )
-                )
-
-                log(
-                    "Properties keys: "
-                    + str(
-                        list(
-                            properties.keys()
-                        )[:30]
-                    )
-                )
-
-                log(
-                    "building="
-                    + str(
-                        properties.get(
-                            "building"
-                        )
-                    )
-                )
-
-                log(
-                    "highway="
-                    + str(
-                        properties.get(
-                            "highway"
-                        )
-                    )
-                )
-
-                log(
-                    "waterway="
-                    + str(
-                        properties.get(
-                            "waterway"
-                        )
-                    )
-                )
-
-                if not geometry_json:
-                    log(
-                        "NO GEOMETRY"
-                    )
-                    continue
-
-                geom = shape(
-                    geometry_json
-                )
-
-                valid += 1
-
-                log(
-                    "Bounds: "
-                    + str(
-                        tuple(
-                            round(
-                                float(v),
-                                6
-                            )
-                            for v in geom.bounds
-                        )
-                    )
-                )
-
-                log(
-                    "Centroid: "
-                    + str(
-                        (
-                            round(
-                                geom.centroid.x,
-                                6
-                            ),
-                            round(
-                                geom.centroid.y,
-                                6
-                            )
-                        )
-                    )
-                )
-
-                hit = geom.intersects(
-                    pune_box
-                )
-
-                log(
-                    "Intersects Pune bbox: "
-                    + str(hit)
-                )
-
-                if hit:
-                    intersects += 1
-
-            except Exception as e:
-                log(
-                    "DIAGNOSTIC ERROR: "
-                    + repr(e)
-                )
-
-    log()
-    log(
-        f"Sampled: {total}"
-    )
-    log(
-        f"Valid geometries: {valid}"
-    )
-    log(
-        f"Intersects Pune: {intersects}"
-    )
-
-    if total == 0:
-        raise RuntimeError(
-            f"{name} GeoJSONSeq contains "
-            "no readable features."
-        )
-
-    return intersects
-
-
-# ============================================================
-# PROCESS FEATURES
-# ============================================================
-
-
-def process_geojsonseq(
-    path: Path,
-    feature_type: str,
-    writer: ChunkWriter
-):
     log()
     log("=" * 70)
     log(
         f"PROCESSING {feature_type.upper()}"
     )
-    log(
-        f"FILE: {path}"
-    )
     log("=" * 70)
-
-    pune_box = box(
-        MIN_LON,
-        MIN_LAT,
-        MAX_LON,
-        MAX_LAT
-    )
 
     total = 0
     accepted = 0
@@ -943,19 +876,19 @@ def process_geojsonseq(
         encoding="utf-8"
     ) as f:
 
-        for raw_line in f:
+        for line in f:
 
-            if not raw_line.strip():
+            if not line.strip():
                 continue
 
             try:
-                feature = (
-                    read_geojsonseq_line(
-                        raw_line
-                    )
+
+                feature = parse_line(
+                    line
                 )
 
             except Exception:
+
                 invalid_json += 1
                 continue
 
@@ -971,46 +904,52 @@ def process_geojsonseq(
             )
 
             if not geometry_json:
+
                 no_geometry += 1
                 continue
 
             try:
+
                 geom = shape(
                     geometry_json
                 )
 
             except Exception:
+
                 invalid_geometry += 1
                 continue
 
             if geom.is_empty:
+
                 empty_geometry += 1
                 continue
 
             try:
+
                 if not geom.intersects(
-                    pune_box
+                    PUNE_BOX
                 ):
+
                     outside_bbox += 1
                     continue
 
             except Exception:
+
                 intersection_errors += 1
                 continue
 
             accepted += 1
 
-            indices = (
-                chunk_indices_for_geometry(
+            for x, y in (
+                geometry_chunks(
                     geom
                 )
-            )
-
-            for x, y in indices:
+            ):
 
                 try:
+
                     clipped = (
-                        clip_to_chunk(
+                        clip_geometry(
                             geom,
                             x,
                             y
@@ -1018,6 +957,7 @@ def process_geojsonseq(
                     )
 
                 except Exception:
+
                     intersection_errors += 1
                     continue
 
@@ -1035,31 +975,44 @@ def process_geojsonseq(
                 )
 
                 writer.write(
-                    chunk_name(x, y),
+                    chunk_name(
+                        x,
+                        y
+                    ),
                     feature_type,
                     out_feature
                 )
 
                 chunk_features += 1
 
-            if total % 100_000 == 0:
+            if total % 100000 == 0:
+
                 log(
-                    f"[{feature_type}] "
-                    f"total={total:,} "
-                    f"accepted={accepted:,} "
-                    f"chunk_features={chunk_features:,}"
+                    f"{feature_type}: "
+                    f"{total:,} total | "
+                    f"{accepted:,} accepted | "
+                    f"{chunk_features:,} chunk features"
                 )
 
     result = {
-        "total": total,
-        "accepted": accepted,
-        "chunk_features": chunk_features,
-        "invalid_json": invalid_json,
-        "no_geometry": no_geometry,
-        "invalid_geometry": invalid_geometry,
-        "empty_geometry": empty_geometry,
-        "outside_bbox": outside_bbox,
-        "intersection_errors": intersection_errors,
+        "total":
+            total,
+        "accepted":
+            accepted,
+        "chunk_features":
+            chunk_features,
+        "invalid_json":
+            invalid_json,
+        "no_geometry":
+            no_geometry,
+        "invalid_geometry":
+            invalid_geometry,
+        "empty_geometry":
+            empty_geometry,
+        "outside_bbox":
+            outside_bbox,
+        "intersection_errors":
+            intersection_errors
     }
 
     log()
@@ -1068,21 +1021,20 @@ def process_geojsonseq(
     )
 
     for key, value in result.items():
+
         log(
             f"  {key}: {value:,}"
-            if isinstance(value, int)
-            else f"  {key}: {value}"
         )
 
     return result
 
 
 # ============================================================
-# FINALIZE CHUNKS
+# FINALIZE
 # ============================================================
 
-
 def finalize_chunks():
+
     log()
     log("=" * 70)
     log("FINALIZING CHUNKS")
@@ -1090,6 +1042,9 @@ def finalize_chunks():
 
     chunk_count = 0
     total_features = 0
+
+    if not CHUNKS_DIR.exists():
+        return 0, 0
 
     for chunk_dir in sorted(
         CHUNKS_DIR.iterdir()
@@ -1103,7 +1058,7 @@ def finalize_chunks():
         for feature_type in (
             "buildings",
             "roads",
-            "waterways",
+            "waterways"
         ):
 
             seq = (
@@ -1128,25 +1083,26 @@ def finalize_chunks():
                         continue
 
                     try:
+
                         feature = (
-                            read_geojsonseq_line(
+                            parse_line(
                                 line
                             )
                         )
 
-                        if feature is not None:
+                        if feature:
                             features.append(
                                 feature
                             )
 
                     except Exception:
-                        continue
+                        pass
 
             if not features:
-                try:
-                    seq.unlink()
-                except Exception:
-                    pass
+
+                seq.unlink(
+                    missing_ok=True
+                )
 
                 continue
 
@@ -1161,50 +1117,46 @@ def finalize_chunks():
                     "type":
                         "FeatureCollection",
                     "features":
-                        features,
+                        features
                 }
             )
 
-            chunk_features += len(
-                features
+            chunk_features += (
+                len(features)
             )
 
-            total_features += len(
-                features
+            total_features += (
+                len(features)
             )
 
-            try:
-                seq.unlink()
-            except Exception:
-                pass
+            seq.unlink(
+                missing_ok=True
+            )
 
         if chunk_features == 0:
-            try:
-                shutil.rmtree(
-                    chunk_dir
-                )
-            except Exception:
-                pass
+
+            shutil.rmtree(
+                chunk_dir,
+                ignore_errors=True
+            )
 
             continue
-
-        metadata = {
-            "chunk":
-                chunk_dir.name,
-            "features":
-                chunk_features,
-            "files":
-                sorted(
-                    p.name
-                    for p in chunk_dir.iterdir()
-                    if p.is_file()
-                )
-        }
 
         write_json(
             chunk_dir /
             "metadata.json",
-            metadata
+            {
+                "chunk":
+                    chunk_dir.name,
+                "features":
+                    chunk_features,
+                "files":
+                    sorted(
+                        p.name
+                        for p in chunk_dir.iterdir()
+                        if p.is_file()
+                    )
+            }
         )
 
         chunk_count += 1
@@ -1215,7 +1167,7 @@ def finalize_chunks():
     )
 
     log(
-        f"Chunk features: "
+        f"Total chunk features: "
         f"{total_features:,}"
     )
 
@@ -1229,22 +1181,16 @@ def finalize_chunks():
 # SUMMARY
 # ============================================================
 
-
-def create_summary(
+def write_summary(
     columns,
     rows,
-    stats
+    stats,
+    chunk_count,
+    total_features
 ):
-    active_chunks = 0
-
-    if CHUNKS_DIR.exists():
-        active_chunks = sum(
-            1
-            for p in CHUNKS_DIR.iterdir()
-            if p.is_dir()
-        )
 
     summary = {
+
         "processor_version":
             VERSION,
 
@@ -1256,8 +1202,11 @@ def create_summary(
             "max_lon":
                 MAX_LON,
             "max_lat":
-                MAX_LAT,
+                MAX_LAT
         },
+
+        "chunk_size_deg":
+            CHUNK_SIZE_DEG,
 
         "chunk_size_m":
             1000,
@@ -1268,37 +1217,39 @@ def create_summary(
             "rows":
                 rows,
             "total":
-                columns * rows,
+                columns * rows
         },
 
         "features":
             stats,
 
         "active_chunks":
-            active_chunks,
+            chunk_count,
+
+        "total_chunk_features":
+            total_features
     }
 
     write_json(
-        DATA_DIR / "summary.json",
+        DATA_DIR /
+        "summary.json",
         summary
     )
-
-    return summary
 
 
 # ============================================================
 # ARCHIVE
 # ============================================================
 
-
 def create_archive():
+
+    if ARCHIVE.exists():
+        ARCHIVE.unlink()
+
     log()
     log("=" * 70)
     log("CREATING ARCHIVE")
     log("=" * 70)
-
-    if ARCHIVE.exists():
-        ARCHIVE.unlink()
 
     run([
         "tar",
@@ -1306,12 +1257,12 @@ def create_archive():
         str(ARCHIVE),
         "-C",
         str(DATA_DIR.parent),
-        DATA_DIR.name,
+        DATA_DIR.name
     ])
 
-    size = require_nonempty_file(
+    size = require_file(
         ARCHIVE,
-        "processor archive"
+        "archive"
     )
 
     log(
@@ -1319,132 +1270,38 @@ def create_archive():
         f"{size / 1024 / 1024:.2f} MB"
     )
 
-    return size
-
-
-# ============================================================
-# VALIDATION
-# ============================================================
-
-
-def validate_output(
-    chunk_count,
-    stats
-):
-    log()
-    log("=" * 70)
-    log("VALIDATING OUTPUT")
-    log("=" * 70)
-
-    if chunk_count <= 0:
-        raise RuntimeError(
-            "ZERO ACTIVE CHUNKS. "
-            "Refusing to create a successful result."
-        )
-
-    buildings_accepted = (
-        stats["buildings"]["accepted"]
-    )
-
-    roads_accepted = (
-        stats["roads"]["accepted"]
-    )
-
-    waterways_accepted = (
-        stats["waterways"]["accepted"]
-    )
-
-    if buildings_accepted <= 0:
-        raise RuntimeError(
-            "ZERO BUILDINGS ACCEPTED."
-        )
-
-    if roads_accepted <= 0:
-        raise RuntimeError(
-            "ZERO ROADS ACCEPTED."
-        )
-
-    if waterways_accepted <= 0:
-        log(
-            "WARNING: zero waterways accepted."
-        )
-
-    building_files = list(
-        CHUNKS_DIR.glob(
-            "*/buildings.geojson"
-        )
-    )
-
-    road_files = list(
-        CHUNKS_DIR.glob(
-            "*/roads.geojson"
-        )
-    )
-
-    if not building_files:
-        raise RuntimeError(
-            "No buildings.geojson files found."
-        )
-
-    if not road_files:
-        raise RuntimeError(
-            "No roads.geojson files found."
-        )
-
-    log(
-        f"Building files: "
-        f"{len(building_files):,}"
-    )
-
-    log(
-        f"Road files: "
-        f"{len(road_files):,}"
-    )
-
-    log(
-        f"Waterway files: "
-        f"{len(list(CHUNKS_DIR.glob('*/waterways.geojson'))):,}"
-    )
-
-    log(
-        "OUTPUT VALIDATION: PASS"
-    )
-
 
 # ============================================================
 # MAIN
 # ============================================================
 
-
 def main():
 
-    log()
     log("=" * 70)
-    log(f"PUNE 1KM PROCESSOR {VERSION}")
-    log("GEOGRAPHIC EXTRACT + DIRECT TAG FILTER")
+    log("PUNE 1KM PROCESSOR v7")
+    log("DIRECT FILTER -> GEOMETRY -> PUNE BBOX -> CHUNKS")
     log("=" * 70)
 
     # --------------------------------------------------------
-    # Basic checks
+    # RAW
     # --------------------------------------------------------
 
-    require_nonempty_file(
+    raw_size = require_file(
         RAW_PBF,
-        "Raw central-zone PBF"
+        "Raw PBF"
     )
 
     log(
-        f"Raw PBF: "
-        f"{RAW_PBF}"
+        f"Raw PBF: {RAW_PBF}"
     )
 
     log(
         f"Raw PBF size: "
-        f"{file_mb(RAW_PBF):.2f} MB"
+        f"{raw_size / 1024 / 1024:.2f} MB"
     )
 
     # --------------------------------------------------------
-    # Clean previous output
+    # CLEAN
     # --------------------------------------------------------
 
     if DATA_DIR.exists():
@@ -1456,22 +1313,19 @@ def main():
         ARCHIVE.unlink()
 
     DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True
+        parents=True
     )
 
     TMP_DIR.mkdir(
-        parents=True,
-        exist_ok=True
+        parents=True
     )
 
     CHUNKS_DIR.mkdir(
-        parents=True,
-        exist_ok=True
+        parents=True
     )
 
     # --------------------------------------------------------
-    # Grid
+    # GRID
     # --------------------------------------------------------
 
     columns, rows = (
@@ -1479,88 +1333,85 @@ def main():
     )
 
     # --------------------------------------------------------
+    # DIRECT FILTER
+    #
     # IMPORTANT:
-    # First geographically isolate Pune.
+    # NO osmium extract here.
     # --------------------------------------------------------
 
-    pune_pbf = (
-        create_pune_extract()
+    buildings_pbf = filter_pbf(
+        "buildings",
+        BUILDING_FILTERS
+    )
+
+    roads_pbf = filter_pbf(
+        "roads",
+        ROAD_FILTERS
+    )
+
+    waterways_pbf = filter_pbf(
+        "waterways",
+        WATERWAY_FILTERS
     )
 
     # --------------------------------------------------------
-    # Filter each feature type
+    # EXPORT
     # --------------------------------------------------------
 
-    buildings_pbf = (
-        create_filtered_pbf(
-            pune_pbf,
-            "buildings",
-            BUILDING_FILTERS
-        )
+    buildings_geo = export_pbf(
+        buildings_pbf,
+        "buildings"
     )
 
-    roads_pbf = (
-        create_filtered_pbf(
-            pune_pbf,
-            "roads",
-            ROAD_FILTERS
-        )
+    roads_geo = export_pbf(
+        roads_pbf,
+        "roads"
     )
 
-    waterways_pbf = (
-        create_filtered_pbf(
-            pune_pbf,
-            "waterways",
-            WATERWAY_FILTERS
-        )
+    waterways_geo = export_pbf(
+        waterways_pbf,
+        "waterways"
     )
 
     # --------------------------------------------------------
-    # Export
+    # DIAGNOSTICS
     # --------------------------------------------------------
 
-    buildings_geo = (
-        export_geojsonseq(
-            buildings_pbf,
-            "buildings"
-        )
-    )
-
-    roads_geo = (
-        export_geojsonseq(
-            roads_pbf,
-            "roads"
-        )
-    )
-
-    waterways_geo = (
-        export_geojsonseq(
-            waterways_pbf,
-            "waterways"
-        )
-    )
-
-    # --------------------------------------------------------
-    # Diagnostic
-    # --------------------------------------------------------
-
-    diagnostic_sample(
+    building_diag = diagnostic(
         buildings_geo,
         "buildings"
     )
 
-    diagnostic_sample(
+    road_diag = diagnostic(
         roads_geo,
         "roads"
     )
 
-    diagnostic_sample(
+    waterway_diag = diagnostic(
         waterways_geo,
         "waterways"
     )
 
     # --------------------------------------------------------
-    # Process
+    # IMPORTANT:
+    # We expect at least some features in Pune.
+    # --------------------------------------------------------
+
+    if (
+        building_diag["intersects"] == 0
+        and road_diag["intersects"] == 0
+        and waterway_diag["intersects"] == 0
+    ):
+
+        raise RuntimeError(
+            "NONE of the sampled exported "
+            "features intersect the Pune bbox. "
+            "The diagnostic above contains the "
+            "actual coordinates. Processing stopped."
+        )
+
+    # --------------------------------------------------------
+    # PROCESS
     # --------------------------------------------------------
 
     writer = ChunkWriter(
@@ -1570,44 +1421,41 @@ def main():
 
     try:
 
-        building_stats = (
-            process_geojsonseq(
-                buildings_geo,
-                "buildings",
-                writer
-            )
+        building_stats = process_file(
+            buildings_geo,
+            "buildings",
+            writer
         )
 
-        road_stats = (
-            process_geojsonseq(
-                roads_geo,
-                "roads",
-                writer
-            )
+        road_stats = process_file(
+            roads_geo,
+            "roads",
+            writer
         )
 
-        waterway_stats = (
-            process_geojsonseq(
-                waterways_geo,
-                "waterways",
-                writer
-            )
+        waterway_stats = process_file(
+            waterways_geo,
+            "waterways",
+            writer
         )
 
     finally:
+
         writer.close()
 
     stats = {
         "buildings":
             building_stats,
+
         "roads":
             road_stats,
+
         "waterways":
-            waterway_stats,
+            waterway_stats
     }
 
     # --------------------------------------------------------
-    # Finalize
+    # FINALIZE
     # --------------------------------------------------------
 
     chunk_count, total_features = (
@@ -1615,32 +1463,48 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Summary
+    # SUMMARY
     # --------------------------------------------------------
 
-    summary = create_summary(
+    write_summary(
         columns,
         rows,
-        stats
-    )
-
-    # --------------------------------------------------------
-    # Hard validation
-    # --------------------------------------------------------
-
-    validate_output(
+        stats,
         chunk_count,
-        stats
+        total_features
     )
 
     # --------------------------------------------------------
-    # Archive
+    # HARD VALIDATION
+    # --------------------------------------------------------
+
+    if chunk_count == 0:
+
+        raise RuntimeError(
+            "ZERO ACTIVE CHUNKS. "
+            "Refusing successful output."
+        )
+
+    if building_stats["accepted"] == 0:
+
+        raise RuntimeError(
+            "ZERO BUILDINGS ACCEPTED."
+        )
+
+    if road_stats["accepted"] == 0:
+
+        raise RuntimeError(
+            "ZERO ROADS ACCEPTED."
+        )
+
+    # --------------------------------------------------------
+    # ARCHIVE
     # --------------------------------------------------------
 
     create_archive()
 
     # --------------------------------------------------------
-    # Print final summary
+    # FINAL
     # --------------------------------------------------------
 
     log()
@@ -1649,44 +1513,30 @@ def main():
     log("=" * 70)
 
     log(
-        f"Active chunks: "
-        f"{chunk_count:,}"
+        f"Active chunks: {chunk_count:,}"
     )
 
     log(
-        f"Total chunk features: "
-        f"{total_features:,}"
+        f"Chunk features: {total_features:,}"
     )
 
     log(
-        f"buildings: "
+        f"Buildings: "
         f"{building_stats['accepted']:,} / "
         f"{building_stats['total']:,}"
     )
 
     log(
-        f"roads: "
+        f"Roads: "
         f"{road_stats['accepted']:,} / "
         f"{road_stats['total']:,}"
     )
 
     log(
-        f"waterways: "
+        f"Waterways: "
         f"{waterway_stats['accepted']:,} / "
         f"{waterway_stats['total']:,}"
     )
-
-    log()
-    log("Output:")
-    log("  data/chunks")
-    log("  data/grid.geojson")
-    log("  data/summary.json")
-    log("  pune-1km-chunks.tar.gz")
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 
 if __name__ == "__main__":
@@ -1695,17 +1545,22 @@ if __name__ == "__main__":
         main()
 
     except KeyboardInterrupt:
+
         log(
-            "\nInterrupted."
+            "Interrupted."
         )
+
         sys.exit(130)
 
     except Exception as e:
+
         log()
         log("=" * 70)
         log("PROCESSING FAILED")
         log("=" * 70)
+
         log(
             f"{type(e).__name__}: {e}"
         )
+
         sys.exit(1)
