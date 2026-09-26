@@ -11,7 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from shapely.geometry import shape, mapping, box
-from shapely.ops import transform
+from shapely.ops import unary_union
 
 
 # ============================================================
@@ -20,12 +20,13 @@ from shapely.ops import transform
 
 PBF_PATH = Path("raw/central-zone.osm.pbf")
 
-OUTPUT_DIR = Path("data/chunks")
-TEMP_DIR = Path("data/.processor_tmp")
+OUTPUT_ROOT = Path("data")
+OUTPUT_DIR = OUTPUT_ROOT / "chunks"
+TEMP_DIR = OUTPUT_ROOT / ".processor_tmp"
 
 CHUNK_SIZE_M = 1000
 
-# Pune-area processing bounds
+# Pune processing area
 MIN_LON = 73.70
 MIN_LAT = 18.40
 MAX_LON = 74.05
@@ -33,26 +34,24 @@ MAX_LAT = 18.70
 
 PROGRESS_EVERY = 50_000
 
-# Rough meters/degree.
-# Accurate enough for determining 1km chunk assignment;
-# geometries themselves remain in WGS84.
-METERS_PER_DEG_LAT = 111_320.0
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+def log(msg=""):
+    print(msg, flush=True)
 
 
 # ============================================================
-# HELPERS
+# COMMAND
 # ============================================================
 
-def log(message: str):
-    print(message, flush=True)
-
-
-def run_command(command):
-    log("")
-    log("[CMD] " + " ".join(str(x) for x in command))
+def run(cmd):
+    log("[CMD] " + " ".join(map(str, cmd)))
 
     result = subprocess.run(
-        command,
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -63,164 +62,166 @@ def run_command(command):
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"Command failed with exit code {result.returncode}: "
-            f"{' '.join(str(x) for x in command)}"
+            "Command failed:\n"
+            + " ".join(map(str, cmd))
         )
 
 
-def ensure_clean_directory(path: Path):
-    if path.exists():
-        shutil.rmtree(path)
+# ============================================================
+# COORDINATE SYSTEM
+# ============================================================
 
-    path.mkdir(parents=True, exist_ok=True)
+LAT0 = (MIN_LAT + MAX_LAT) / 2.0
+
+METERS_PER_DEG_LAT = 111320.0
+METERS_PER_DEG_LON = (
+    111320.0 * math.cos(math.radians(LAT0))
+)
 
 
-def lonlat_to_meters(lon, lat):
-    """
-    Local equirectangular approximation.
-
-    Used only for chunk assignment.
-    """
-    lat0 = (MIN_LAT + MAX_LAT) / 2.0
-
-    meters_per_deg_lon = (
-        111_320.0 * math.cos(math.radians(lat0))
-    )
-
-    x = (lon - MIN_LON) * meters_per_deg_lon
+def lonlat_to_xy(lon, lat):
+    x = (lon - MIN_LON) * METERS_PER_DEG_LON
     y = (lat - MIN_LAT) * METERS_PER_DEG_LAT
-
     return x, y
 
 
-def meters_to_lonlat(x, y):
-    lat0 = (MIN_LAT + MAX_LAT) / 2.0
-
-    meters_per_deg_lon = (
-        111_320.0 * math.cos(math.radians(lat0))
-    )
-
-    lon = MIN_LON + x / meters_per_deg_lon
+def xy_to_lonlat(x, y):
+    lon = MIN_LON + x / METERS_PER_DEG_LON
     lat = MIN_LAT + y / METERS_PER_DEG_LAT
-
     return lon, lat
 
 
-def get_grid_dimensions():
-    x0, y0 = lonlat_to_meters(MIN_LON, MIN_LAT)
-    x1, y1 = lonlat_to_meters(MAX_LON, MAX_LAT)
+# ============================================================
+# GRID
+# ============================================================
 
-    width = abs(x1 - x0)
-    height = abs(y1 - y0)
+TOTAL_WIDTH_M = (
+    MAX_LON - MIN_LON
+) * METERS_PER_DEG_LON
 
-    cols = math.ceil(width / CHUNK_SIZE_M)
-    rows = math.ceil(height / CHUNK_SIZE_M)
+TOTAL_HEIGHT_M = (
+    MAX_LAT - MIN_LAT
+) * METERS_PER_DEG_LAT
 
-    return width, height, cols, rows
+GRID_COLS = math.ceil(
+    TOTAL_WIDTH_M / CHUNK_SIZE_M
+)
+
+GRID_ROWS = math.ceil(
+    TOTAL_HEIGHT_M / CHUNK_SIZE_M
+)
 
 
-def geometry_bounds(geom):
+def chunk_id(col, row):
+    return f"PUNE_{col:04d}_{row:04d}"
+
+
+def chunk_bounds(col, row):
+
+    x1 = col * CHUNK_SIZE_M
+    y1 = row * CHUNK_SIZE_M
+
+    x2 = min(
+        x1 + CHUNK_SIZE_M,
+        TOTAL_WIDTH_M,
+    )
+
+    y2 = min(
+        y1 + CHUNK_SIZE_M,
+        TOTAL_HEIGHT_M,
+    )
+
+    lon1, lat1 = xy_to_lonlat(x1, y1)
+    lon2, lat2 = xy_to_lonlat(x2, y2)
+
+    return (
+        max(MIN_LON, lon1),
+        max(MIN_LAT, lat1),
+        min(MAX_LON, lon2),
+        min(MAX_LAT, lat2),
+    )
+
+
+def chunk_polygon(col, row):
+
+    min_lon, min_lat, max_lon, max_lat = (
+        chunk_bounds(col, row)
+    )
+
+    return box(
+        min_lon,
+        min_lat,
+        max_lon,
+        max_lat,
+    )
+
+
+def geometry_chunks(geom):
+
+    if geom.is_empty:
+        return []
+
     minx, miny, maxx, maxy = geom.bounds
 
-    # Reject completely invalid coordinates.
-    if (
-        not all(
-            math.isfinite(v)
-            for v in [minx, miny, maxx, maxy]
-        )
-    ):
-        return None
+    minx = max(minx, MIN_LON)
+    miny = max(miny, MIN_LAT)
+    maxx = min(maxx, MAX_LON)
+    maxy = min(maxy, MAX_LAT)
 
-    return minx, miny, maxx, maxy
-
-
-def get_chunk_indices(geom):
-    bounds = geometry_bounds(geom)
-
-    if bounds is None:
+    if minx >= maxx or miny >= maxy:
         return []
 
-    min_lon, min_lat, max_lon, max_lat = bounds
+    x1, y1 = lonlat_to_xy(minx, miny)
+    x2, y2 = lonlat_to_xy(maxx, maxy)
 
-    if max_lon < MIN_LON:
-        return []
+    col1 = max(
+        0,
+        int(math.floor(x1 / CHUNK_SIZE_M)),
+    )
 
-    if min_lon > MAX_LON:
-        return []
+    row1 = max(
+        0,
+        int(math.floor(y1 / CHUNK_SIZE_M)),
+    )
 
-    if max_lat < MIN_LAT:
-        return []
+    col2 = min(
+        GRID_COLS - 1,
+        int(math.floor(x2 / CHUNK_SIZE_M)),
+    )
 
-    if min_lat > MAX_LAT:
-        return []
-
-    min_lon = max(min_lon, MIN_LON)
-    max_lon = min(max_lon, MAX_LON)
-    min_lat = max(min_lat, MIN_LAT)
-    max_lat = min(max_lat, MAX_LAT)
-
-    x0, y0 = lonlat_to_meters(min_lon, min_lat)
-    x1, y1 = lonlat_to_meters(max_lon, max_lat)
-
-    min_col = max(0, int(math.floor(min(x0, x1) / CHUNK_SIZE_M)))
-    max_col = max(0, int(math.floor(max(x0, x1) / CHUNK_SIZE_M)))
-
-    min_row = max(0, int(math.floor(min(y0, y1) / CHUNK_SIZE_M)))
-    max_row = max(0, int(math.floor(max(y0, y1) / CHUNK_SIZE_M)))
-
-    _, _, cols, rows = get_grid_dimensions()
-
-    max_col = min(max_col, cols - 1)
-    max_row = min(max_row, rows - 1)
+    row2 = min(
+        GRID_ROWS - 1,
+        int(math.floor(y2 / CHUNK_SIZE_M)),
+    )
 
     result = []
 
-    for row in range(min_row, max_row + 1):
-        for col in range(min_col, max_col + 1):
+    for row in range(row1, row2 + 1):
+        for col in range(col1, col2 + 1):
             result.append((col, row))
 
     return result
 
 
-def chunk_name(col, row):
-    return f"PUNE_{col:04d}_{row:04d}"
+# ============================================================
+# GEOJSON
+# ============================================================
 
+def write_geojson(path, features):
 
-def chunk_bounds(col, row):
-    min_x = col * CHUNK_SIZE_M
-    min_y = row * CHUNK_SIZE_M
-
-    max_x = min_x + CHUNK_SIZE_M
-    max_y = min_y + CHUNK_SIZE_M
-
-    lon1, lat1 = meters_to_lonlat(min_x, min_y)
-    lon2, lat2 = meters_to_lonlat(max_x, max_y)
-
-    return {
-        "min_lon": max(MIN_LON, lon1),
-        "min_lat": max(MIN_LAT, lat1),
-        "max_lon": min(MAX_LON, lon2),
-        "max_lat": min(MAX_LAT, lat2),
-    }
-
-
-def feature_record(geom, properties):
-    return {
-        "type": "Feature",
-        "geometry": mapping(geom),
-        "properties": properties or {},
-    }
-
-
-def write_geojson(path: Path, features):
-    collection = {
+    data = {
         "type": "FeatureCollection",
         "features": features,
     }
 
-    with path.open("w", encoding="utf-8") as f:
+    with open(
+        path,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
         json.dump(
-            collection,
+            data,
             f,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -228,90 +229,129 @@ def write_geojson(path: Path, features):
 
 
 # ============================================================
-# OSM FILTERING
+# PUNE BBOX EXTRACTION
 # ============================================================
 
-def filter_osm():
+def extract_pune_pbf():
 
-    if not PBF_PATH.exists():
-        raise FileNotFoundError(
-            f"OSM PBF not found: {PBF_PATH}"
+    TEMP_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    pune_pbf = (
+        TEMP_DIR / "pune.osm.pbf"
+    )
+
+    log("")
+    log("=" * 50)
+    log("EXTRACTING PUNE BBOX")
+    log("=" * 50)
+
+    # -b = bounding box
+    # -o = output
+    #
+    # We intentionally create a Pune-only PBF first.
+    run([
+        "osmium",
+        "extract",
+        "-b",
+        f"{MIN_LON},{MIN_LAT},{MAX_LON},{MAX_LAT}",
+        str(PBF_PATH),
+        "-o",
+        str(pune_pbf),
+        "--overwrite",
+    ])
+
+    if not pune_pbf.exists():
+        raise RuntimeError(
+            "Pune PBF was not created."
         )
 
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
-    buildings_pbf = TEMP_DIR / "buildings.osm.pbf"
-    roads_pbf = TEMP_DIR / "roads.osm.pbf"
-    waterways_pbf = TEMP_DIR / "waterways.osm.pbf"
-
     log("")
-    log("==========================================")
-    log("FILTERING OSM DATA")
-    log("==========================================")
+    log("Pune PBF:")
+    log(
+        f"  {pune_pbf}"
+    )
+    log(
+        f"  {pune_pbf.stat().st_size / 1024 / 1024:.2f} MB"
+    )
 
-    # Buildings
-    run_command([
-        "osmium",
-        "tags-filter",
-        str(PBF_PATH),
-        "w/building",
-        "r/building",
-        "-o",
-        str(buildings_pbf),
-        "--overwrite",
-    ])
-
-    # Roads
-    run_command([
-        "osmium",
-        "tags-filter",
-        str(PBF_PATH),
-        "w/highway",
-        "r/highway",
-        "-o",
-        str(roads_pbf),
-        "--overwrite",
-    ])
-
-    # Waterways
-    run_command([
-        "osmium",
-        "tags-filter",
-        str(PBF_PATH),
-        "w/waterway",
-        "r/waterway",
-        "-o",
-        str(waterways_pbf),
-        "--overwrite",
-    ])
-
-    return buildings_pbf, roads_pbf, waterways_pbf
+    return pune_pbf
 
 
 # ============================================================
-# GEOJSON PROCESSING
+# TAG FILTERING
 # ============================================================
 
-def export_geojsonseq(source_pbf: Path, output_path: Path):
+def create_filtered_pbf(
+    pune_pbf,
+    name,
+    filters,
+):
+
+    output = (
+        TEMP_DIR / f"{name}.osm.pbf"
+    )
 
     log("")
-    log("==========================================")
-    log(f"EXPORTING {source_pbf.name}")
-    log("==========================================")
+    log("=" * 50)
+    log(f"FILTERING {name}")
+    log("=" * 50)
 
-    run_command([
+    run([
+        "osmium",
+        "tags-filter",
+        str(pune_pbf),
+        *filters,
+        "-o",
+        str(output),
+        "--overwrite",
+    ])
+
+    return output
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+def export_geojsonseq(
+    pbf_path,
+    name,
+):
+
+    output = (
+        TEMP_DIR / f"{name}.geojsonseq"
+    )
+
+    log("")
+    log("=" * 50)
+    log(f"EXPORTING {name}")
+    log("=" * 50)
+
+    run([
         "osmium",
         "export",
-        str(source_pbf),
+        str(pbf_path),
         "-f",
         "geojsonseq",
         "-o",
-        str(output_path),
+        str(output),
         "--overwrite",
     ])
 
+    return output
 
-def classify_properties(properties, data_type):
+
+# ============================================================
+# PROPERTIES
+# ============================================================
+
+def clean_properties(
+    properties,
+    data_type,
+):
 
     properties = properties or {}
 
@@ -321,11 +361,19 @@ def classify_properties(properties, data_type):
             return None
 
         return {
-            "building": properties.get("building"),
-            "height": properties.get("height"),
-            "building:levels": properties.get("building:levels"),
-            "name": properties.get("name"),
             "osm_id": properties.get("@id"),
+            "building": properties.get(
+                "building"
+            ),
+            "height": properties.get(
+                "height"
+            ),
+            "building:levels": properties.get(
+                "building:levels"
+            ),
+            "name": properties.get(
+                "name"
+            ),
         }
 
     if data_type == "roads":
@@ -334,13 +382,25 @@ def classify_properties(properties, data_type):
             return None
 
         return {
-            "highway": properties.get("highway"),
-            "name": properties.get("name"),
-            "ref": properties.get("ref"),
-            "surface": properties.get("surface"),
-            "lanes": properties.get("lanes"),
-            "maxspeed": properties.get("maxspeed"),
             "osm_id": properties.get("@id"),
+            "highway": properties.get(
+                "highway"
+            ),
+            "name": properties.get(
+                "name"
+            ),
+            "ref": properties.get(
+                "ref"
+            ),
+            "surface": properties.get(
+                "surface"
+            ),
+            "lanes": properties.get(
+                "lanes"
+            ),
+            "maxspeed": properties.get(
+                "maxspeed"
+            ),
         }
 
     if data_type == "waterways":
@@ -349,31 +409,40 @@ def classify_properties(properties, data_type):
             return None
 
         return {
-            "waterway": properties.get("waterway"),
-            "name": properties.get("name"),
             "osm_id": properties.get("@id"),
+            "waterway": properties.get(
+                "waterway"
+            ),
+            "name": properties.get(
+                "name"
+            ),
         }
 
     return None
 
 
-def process_geojsonseq(
-    geojsonseq_path: Path,
-    data_type: str,
-    chunk_features,
-    counters,
+# ============================================================
+# PROCESS ONE GEOJSONSEQ
+# ============================================================
+
+def process_file(
+    path,
+    data_type,
+    chunks,
+    stats,
 ):
 
     log("")
-    log("==========================================")
+    log("=" * 50)
     log(f"PROCESSING {data_type}")
-    log(f"FILE: {geojsonseq_path}")
-    log("==========================================")
+    log("=" * 50)
 
-    feature_count = 0
-    accepted_count = 0
+    total = 0
+    accepted = 0
+    clipped = 0
 
-    with geojsonseq_path.open(
+    with open(
+        path,
         "r",
         encoding="utf-8",
     ) as f:
@@ -385,198 +454,296 @@ def process_geojsonseq(
             if not line:
                 continue
 
-            feature_count += 1
+            total += 1
 
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
-                counters["invalid_json"] += 1
+            except Exception:
+                stats["invalid_json"] += 1
                 continue
 
-            geometry_data = obj.get("geometry")
+            geom_data = obj.get(
+                "geometry"
+            )
 
-            if not geometry_data:
-                counters["no_geometry"] += 1
-                continue
-
-            geometry_type = geometry_data.get("type")
-
-            # Ignore point features.
-            if geometry_type == "Point":
-                counters["points_skipped"] += 1
+            if not geom_data:
+                stats["no_geometry"] += 1
                 continue
 
             try:
-                geom = shape(geometry_data)
+                geom = shape(
+                    geom_data
+                )
             except Exception:
-                counters["invalid_geometry"] += 1
+                stats["invalid_geometry"] += 1
                 continue
 
             if geom.is_empty:
-                counters["empty_geometry"] += 1
+                stats["empty_geometry"] += 1
                 continue
 
-            properties = obj.get("properties") or {}
-
-            clean_properties = classify_properties(
-                properties,
+            props = clean_properties(
+                obj.get("properties"),
                 data_type,
             )
 
-            if clean_properties is None:
-                counters["wrong_tag"] += 1
+            if props is None:
+                stats["wrong_tag"] += 1
                 continue
 
-            chunk_indices = get_chunk_indices(geom)
+            chunks_for_geom = geometry_chunks(
+                geom
+            )
 
-            if not chunk_indices:
-                counters["outside_bbox"] += 1
+            if not chunks_for_geom:
+                stats["outside_bbox"] += 1
                 continue
 
-            for col, row in chunk_indices:
+            accepted += 1
 
-                name = chunk_name(col, row)
+            for col, row in chunks_for_geom:
 
-                chunk_features[name][data_type].append(
-                    feature_record(
-                        geom,
-                        clean_properties,
-                    )
+                cid = chunk_id(
+                    col,
+                    row,
                 )
 
-            accepted_count += 1
+                chunk_box = chunk_polygon(
+                    col,
+                    row,
+                )
 
-            if feature_count % PROGRESS_EVERY == 0:
+                try:
+                    clipped_geom = (
+                        geom.intersection(
+                            chunk_box
+                        )
+                    )
+                except Exception:
+                    stats[
+                        "intersection_errors"
+                    ] += 1
+                    continue
+
+                if clipped_geom.is_empty:
+                    continue
+
+                # Fix invalid polygon geometries
+                # where possible.
+                if not clipped_geom.is_valid:
+
+                    try:
+                        clipped_geom = (
+                            clipped_geom.buffer(0)
+                        )
+                    except Exception:
+                        continue
+
+                if clipped_geom.is_empty:
+                    continue
+
+                chunks[cid][
+                    data_type
+                ].append(
+                    {
+                        "type": "Feature",
+                        "geometry": mapping(
+                            clipped_geom
+                        ),
+                        "properties": props,
+                    }
+                )
+
+                clipped += 1
+
+            if total % PROGRESS_EVERY == 0:
 
                 log(
                     f"[{data_type}] "
-                    f"features={feature_count:,} "
-                    f"accepted={accepted_count:,} "
-                    f"chunks={len(chunk_features):,}"
+                    f"processed={total:,} "
+                    f"accepted={accepted:,} "
+                    f"chunk_geometries={clipped:,} "
+                    f"active_chunks={len(chunks):,}"
                 )
-
-    log(
-        f"[{data_type}] COMPLETE "
-        f"features={feature_count:,} "
-        f"accepted={accepted_count:,}"
-    )
-
-    return feature_count, accepted_count
-
-
-# ============================================================
-# CHUNK OUTPUT
-# ============================================================
-
-def create_chunk_output(chunk_features):
 
     log("")
-    log("==========================================")
-    log("WRITING 1 KM CHUNKS")
-    log("==========================================")
+    log(
+        f"[{data_type}] COMPLETE"
+    )
+    log(
+        f"  total    = {total:,}"
+    )
+    log(
+        f"  accepted = {accepted:,}"
+    )
+    log(
+        f"  chunks   = {clipped:,}"
+    )
 
-    _, _, cols, rows = get_grid_dimensions()
+    return {
+        "total": total,
+        "accepted": accepted,
+        "chunk_geometries": clipped,
+    }
 
-    all_chunk_names = set(chunk_features.keys())
 
-    for row in range(rows):
-        for col in range(cols):
+# ============================================================
+# WRITE CHUNKS
+# ============================================================
 
-            name = chunk_name(col, row)
+def write_chunks(chunks):
 
-            if name not in all_chunk_names:
-                continue
+    log("")
+    log("=" * 50)
+    log("WRITING CHUNKS")
+    log("=" * 50)
 
-            data = chunk_features[name]
+    written = 0
 
-            chunk_dir = OUTPUT_DIR / name
-            chunk_dir.mkdir(parents=True, exist_ok=True)
+    for cid in sorted(chunks):
 
-            bounds = chunk_bounds(col, row)
+        data = chunks[cid]
 
-            metadata = {
-                "chunk_id": name,
-                "col": col,
-                "row": row,
-                "chunk_size_m": CHUNK_SIZE_M,
-                "bounds": bounds,
-                "crs": "EPSG:4326",
-                "source": "OpenStreetMap",
-                "features": {
-                    "buildings": len(
-                        data["buildings"]
-                    ),
-                    "roads": len(
-                        data["roads"]
-                    ),
-                    "waterways": len(
-                        data["waterways"]
-                    ),
-                },
-            }
-
-            with (
-                chunk_dir / "metadata.json"
-            ).open(
-                "w",
-                encoding="utf-8",
-            ) as f:
-
-                json.dump(
-                    metadata,
-                    f,
-                    indent=2,
-                )
-
-            for data_type in [
+        if not any(
+            data[key]
+            for key in [
                 "buildings",
                 "roads",
                 "waterways",
-            ]:
+            ]
+        ):
+            continue
 
-                features = data[data_type]
+        try:
+            col = int(
+                cid.split("_")[1]
+            )
 
-                if not features:
-                    continue
+            row = int(
+                cid.split("_")[2]
+            )
+        except Exception:
+            continue
 
-                write_geojson(
-                    chunk_dir / f"{data_type}.geojson",
-                    features,
-                )
+        directory = (
+            OUTPUT_DIR / cid
+        )
+
+        directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        min_lon, min_lat, max_lon, max_lat = (
+            chunk_bounds(
+                col,
+                row,
+            )
+        )
+
+        metadata = {
+            "chunk_id": cid,
+            "col": col,
+            "row": row,
+            "chunk_size_m": CHUNK_SIZE_M,
+            "bounds": {
+                "min_lon": min_lon,
+                "min_lat": min_lat,
+                "max_lon": max_lon,
+                "max_lat": max_lat,
+            },
+            "crs": "EPSG:4326",
+            "source": "OpenStreetMap",
+            "features": {
+                "buildings": len(
+                    data["buildings"]
+                ),
+                "roads": len(
+                    data["roads"]
+                ),
+                "waterways": len(
+                    data["waterways"]
+                ),
+            },
+        }
+
+        with open(
+            directory / "metadata.json",
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            json.dump(
+                metadata,
+                f,
+                indent=2,
+            )
+
+        for data_type in [
+            "buildings",
+            "roads",
+            "waterways",
+        ]:
+
+            features = data[
+                data_type
+            ]
+
+            if not features:
+                continue
+
+            write_geojson(
+                directory
+                / f"{data_type}.geojson",
+                features,
+            )
+
+        written += 1
+
+        if written % 100 == 0:
+
+            log(
+                f"Written chunks: "
+                f"{written:,}"
+            )
 
     log(
-        f"Chunks written: {len(all_chunk_names):,}"
+        f"TOTAL CHUNKS WRITTEN: "
+        f"{written:,}"
     )
+
+    return written
 
 
 # ============================================================
 # GRID
 # ============================================================
 
-def create_grid():
-
-    _, _, cols, rows = get_grid_dimensions()
+def write_grid():
 
     features = []
 
-    for row in range(rows):
-        for col in range(cols):
+    for row in range(
+        GRID_ROWS
+    ):
 
-            bounds = chunk_bounds(col, row)
+        for col in range(
+            GRID_COLS
+        ):
 
-            polygon = box(
-                bounds["min_lon"],
-                bounds["min_lat"],
-                bounds["max_lon"],
-                bounds["max_lat"],
+            polygon = chunk_polygon(
+                col,
+                row,
             )
 
             features.append(
                 {
                     "type": "Feature",
-                    "geometry": mapping(polygon),
+                    "geometry": mapping(
+                        polygon
+                    ),
                     "properties": {
-                        "chunk_id": chunk_name(
+                        "chunk_id": chunk_id(
                             col,
                             row,
                         ),
@@ -586,10 +753,9 @@ def create_grid():
                 }
             )
 
-    path = OUTPUT_DIR.parent / "grid.geojson"
-
     write_geojson(
-        path,
+        OUTPUT_ROOT
+        / "grid.geojson",
         features,
     )
 
@@ -598,14 +764,11 @@ def create_grid():
 # SUMMARY
 # ============================================================
 
-def create_summary(
-    counters,
+def write_summary(
     feature_stats,
+    processing_stats,
+    active_chunks,
 ):
-
-    width, height, cols, rows = (
-        get_grid_dimensions()
-    )
 
     summary = {
         "bbox": {
@@ -616,21 +779,21 @@ def create_summary(
         },
         "chunk_size_m": CHUNK_SIZE_M,
         "grid": {
-            "columns": cols,
-            "rows": rows,
-            "total": cols * rows,
-        },
-        "dimensions_m": {
-            "width": width,
-            "height": height,
+            "columns": GRID_COLS,
+            "rows": GRID_ROWS,
+            "total": (
+                GRID_COLS * GRID_ROWS
+            ),
         },
         "features": feature_stats,
-        "processing": counters,
+        "processing": dict(
+            processing_stats
+        ),
+        "active_chunks": active_chunks,
     }
 
-    path = OUTPUT_DIR.parent / "summary.json"
-
-    with path.open(
+    with open(
+        OUTPUT_ROOT / "summary.json",
         "w",
         encoding="utf-8",
     ) as f:
@@ -643,7 +806,7 @@ def create_summary(
 
 
 # ============================================================
-# TAR
+# ARCHIVE
 # ============================================================
 
 def create_archive():
@@ -656,9 +819,9 @@ def create_archive():
         archive.unlink()
 
     log("")
-    log("==========================================")
+    log("=" * 50)
     log("CREATING ARCHIVE")
-    log("==========================================")
+    log("=" * 50)
 
     with tarfile.open(
         archive,
@@ -667,19 +830,32 @@ def create_archive():
     ) as tar:
 
         tar.add(
-            OUTPUT_DIR.parent,
+            OUTPUT_DIR,
             arcname="chunks",
         )
 
-    size_mb = archive.stat().st_size / (
-        1024 * 1024
+        tar.add(
+            OUTPUT_ROOT / "grid.geojson",
+            arcname="grid.geojson",
+        )
+
+        tar.add(
+            OUTPUT_ROOT / "summary.json",
+            arcname="summary.json",
+        )
+
+    size = (
+        archive.stat().st_size
+        / 1024
+        / 1024
     )
 
     log(
-        f"Archive created: {archive}"
+        f"Archive: {archive}"
     )
+
     log(
-        f"Archive size: {size_mb:.2f} MB"
+        f"Size: {size:.2f} MB"
     )
 
 
@@ -689,92 +865,118 @@ def create_archive():
 
 def main():
 
-    log("")
-    log("==========================================")
-    log("PUNE 1 KM PROCESSOR")
-    log("==========================================")
-
-    if not shutil.which("osmium"):
-        raise RuntimeError(
-            "osmium command not found. "
-            "Install osmium-tool first."
-        )
-
-    log("")
-    log("OSM PBF:")
-    log(f"  {PBF_PATH}")
+    log("=" * 60)
+    log("PUNE 1KM PROCESSOR v2")
+    log("=" * 60)
 
     if not PBF_PATH.exists():
         raise FileNotFoundError(
-            PBF_PATH
+            f"Missing PBF: {PBF_PATH}"
         )
 
-    width, height, cols, rows = (
-        get_grid_dimensions()
+    if shutil.which("osmium") is None:
+        raise RuntimeError(
+            "osmium-tool is not installed."
+        )
+
+    log("")
+    log("PUNE BBOX")
+    log(
+        f"{MIN_LON},"
+        f"{MIN_LAT},"
+        f"{MAX_LON},"
+        f"{MAX_LAT}"
     )
 
     log("")
-    log("BBOX:")
-    log(f"  min_lon = {MIN_LON}")
-    log(f"  min_lat = {MIN_LAT}")
-    log(f"  max_lon = {MAX_LON}")
-    log(f"  max_lat = {MAX_LAT}")
+    log("GRID")
+    log(
+        f"{GRID_COLS} x {GRID_ROWS} "
+        f"= {GRID_COLS * GRID_ROWS:,} chunks"
+    )
 
-    log("")
-    log("GRID:")
-    log(f"  Width  : {width:.2f} m")
-    log(f"  Height : {height:.2f} m")
-    log(f"  Chunk  : {CHUNK_SIZE_M} m")
-    log(f"  Grid   : {cols} x {rows}")
-    log(f"  Total  : {cols * rows:,}")
+    # Clean old output
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(
+            OUTPUT_DIR
+        )
 
-    ensure_clean_directory(OUTPUT_DIR)
-    ensure_clean_directory(TEMP_DIR)
+    if TEMP_DIR.exists():
+        shutil.rmtree(
+            TEMP_DIR
+        )
 
-    # --------------------------------------------------------
-    # Filter PBF
-    # --------------------------------------------------------
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    buildings_pbf, roads_pbf, waterways_pbf = (
-        filter_osm()
+    TEMP_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
     # --------------------------------------------------------
-    # Export only relevant data
+    # STEP 1
     # --------------------------------------------------------
 
-    buildings_geojsonseq = (
-        TEMP_DIR / "buildings.geojsonseq"
+    pune_pbf = extract_pune_pbf()
+
+    # --------------------------------------------------------
+    # STEP 2
+    # --------------------------------------------------------
+
+    buildings_pbf = create_filtered_pbf(
+        pune_pbf,
+        "buildings",
+        [
+            "w/building",
+            "r/building",
+        ],
     )
 
-    roads_geojsonseq = (
-        TEMP_DIR / "roads.geojsonseq"
+    roads_pbf = create_filtered_pbf(
+        pune_pbf,
+        "roads",
+        [
+            "w/highway",
+            "r/highway",
+        ],
     )
 
-    waterways_geojsonseq = (
-        TEMP_DIR / "waterways.geojsonseq"
+    waterways_pbf = create_filtered_pbf(
+        pune_pbf,
+        "waterways",
+        [
+            "w/waterway",
+            "r/waterway",
+        ],
     )
 
-    export_geojsonseq(
+    # --------------------------------------------------------
+    # STEP 3
+    # --------------------------------------------------------
+
+    buildings_json = export_geojsonseq(
         buildings_pbf,
-        buildings_geojsonseq,
+        "buildings",
     )
 
-    export_geojsonseq(
+    roads_json = export_geojsonseq(
         roads_pbf,
-        roads_geojsonseq,
+        "roads",
     )
 
-    export_geojsonseq(
+    waterways_json = export_geojsonseq(
         waterways_pbf,
-        waterways_geojsonseq,
+        "waterways",
     )
 
     # --------------------------------------------------------
-    # Process
+    # STEP 4
     # --------------------------------------------------------
 
-    chunk_features = defaultdict(
+    chunks = defaultdict(
         lambda: {
             "buildings": [],
             "roads": [],
@@ -782,84 +984,78 @@ def main():
         }
     )
 
-    counters = defaultdict(int)
+    processing_stats = defaultdict(
+        int
+    )
 
     feature_stats = {}
 
-    for data_type, path in [
-        (
-            "buildings",
-            buildings_geojsonseq,
-        ),
-        (
-            "roads",
-            roads_geojsonseq,
-        ),
-        (
-            "waterways",
-            waterways_geojsonseq,
-        ),
-    ]:
-
-        total, accepted = process_geojsonseq(
-            path,
-            data_type,
-            chunk_features,
-            counters,
-        )
-
-        feature_stats[data_type] = {
-            "total": total,
-            "accepted": accepted,
-        }
-
-    # --------------------------------------------------------
-    # Output
-    # --------------------------------------------------------
-
-    create_chunk_output(
-        chunk_features
+    feature_stats[
+        "buildings"
+    ] = process_file(
+        buildings_json,
+        "buildings",
+        chunks,
+        processing_stats,
     )
 
-    create_grid()
+    feature_stats[
+        "roads"
+    ] = process_file(
+        roads_json,
+        "roads",
+        chunks,
+        processing_stats,
+    )
 
-    create_summary(
-        counters,
+    feature_stats[
+        "waterways"
+    ] = process_file(
+        waterways_json,
+        "waterways",
+        chunks,
+        processing_stats,
+    )
+
+    # --------------------------------------------------------
+    # STEP 5
+    # --------------------------------------------------------
+
+    active_chunks = write_chunks(
+        chunks
+    )
+
+    write_grid()
+
+    write_summary(
         feature_stats,
+        processing_stats,
+        active_chunks,
     )
+
+    # --------------------------------------------------------
+    # STEP 6
+    # --------------------------------------------------------
 
     create_archive()
 
-    # --------------------------------------------------------
-    # Final report
-    # --------------------------------------------------------
-
     log("")
-    log("==========================================")
+    log("=" * 60)
     log("PROCESSING COMPLETE")
-    log("==========================================")
+    log("=" * 60)
 
     log(
         f"Active chunks: "
-        f"{len(chunk_features):,}"
+        f"{active_chunks:,}"
     )
 
-    for data_type, stats in feature_stats.items():
+    for name, stats in feature_stats.items():
 
         log(
-            f"{data_type}: "
+            f"{name}: "
             f"{stats['accepted']:,} / "
             f"{stats['total']:,}"
         )
-
-    log("")
-    log("OUTPUT:")
-    log(
-        f"  {OUTPUT_DIR.parent}"
-    )
-    log(
-        "  pune-1km-chunks.tar.gz"
-    )
 
 
 if __name__ == "__main__":
@@ -869,17 +1065,20 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
 
-        log("")
-        log("Processing cancelled.")
+        log(
+            "\nProcessing cancelled."
+        )
 
         sys.exit(130)
 
-    except Exception as exc:
+    except Exception as e:
 
-        log("")
-        log("==========================================")
-        log("PROCESSING FAILED")
-        log("==========================================")
-        log(str(exc))
+        log(
+            "\nPROCESSING FAILED:"
+        )
+
+        log(
+            repr(e)
+        )
 
         sys.exit(1)
