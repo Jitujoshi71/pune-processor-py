@@ -1,4 +1,4 @@
-name: Process Pune 1km Chunks
+name: Process Pune 1km Chunks v2
 
 on:
   workflow_dispatch:
@@ -13,31 +13,42 @@ jobs:
     timeout-minutes: 360
 
     steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show system information
+      # ======================================================
+      # SYSTEM
+      # ======================================================
+
+      - name: System information
         run: |
+          set -e
+
           echo "=========================================="
           echo "SYSTEM"
           echo "=========================================="
 
-          uname -a
-          echo
-
           echo "CPU:"
           nproc
-          echo
 
-          echo "MEMORY:"
+          echo
+          echo "RAM:"
           free -h
-          echo
 
+          echo
           echo "DISK:"
           df -h
-          echo
 
-      - name: Install osmium
+      # ======================================================
+      # OSMIUM
+      # ======================================================
+
+      - name: Install osmium-tool
         run: |
           set -e
 
@@ -49,6 +60,10 @@ jobs:
           echo
           osmium version
 
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -56,19 +71,26 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          set -e
+
+          python -m pip install \
+            --upgrade pip
 
           pip install \
             -r requirements.txt
 
-      - name: Download Pune raw release
+      # ======================================================
+      # DOWNLOAD RAW PBF
+      # ======================================================
+
+      - name: Download Pune raw OSM PBF
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
           echo "=========================================="
-          echo "DOWNLOADING RAW DATA"
+          echo "DOWNLOADING RAW PBF"
           echo "=========================================="
 
           mkdir -p raw
@@ -80,60 +102,124 @@ jobs:
             --dir raw \
             --clobber
 
-          echo
-          echo "Downloaded:"
-          ls -lh raw/
+          test -f raw/central-zone.osm.pbf
 
-      - name: Validate input PBF
+          ls -lh raw/central-zone.osm.pbf
+
+      # ======================================================
+      # INPUT VALIDATION
+      # ======================================================
+
+      - name: Validate PBF
         run: |
           set -e
 
-          test -f raw/central-zone.osm.pbf
+          echo "=========================================="
+          echo "OSM FILE INFO"
+          echo "=========================================="
 
-          echo "PBF:"
-          ls -lh raw/central-zone.osm.pbf
-
-          echo
-          echo "OSM INFO:"
           osmium fileinfo \
             raw/central-zone.osm.pbf \
             --extended
 
-      - name: Run Pune processor
+      # ======================================================
+      # PROCESS
+      # ======================================================
+
+      - name: Process Pune 1km chunks
         run: |
           set -e
 
+          echo "=========================================="
+          echo "STARTING PROCESSOR"
+          echo "=========================================="
+
           python -u processor.py
 
-      - name: Inspect output
+      # ======================================================
+      # OUTPUT INSPECTION
+      # ======================================================
+
+      - name: Inspect generated chunks
         if: always()
         run: |
           echo "=========================================="
-          echo "OUTPUT"
+          echo "GENERATED OUTPUT"
           echo "=========================================="
 
-          if [ -d data ]; then
-            find data \
-              -maxdepth 3 \
-              -type f \
-              -printf '%p %k KB\n' \
+          if [ -d data/chunks ]; then
+
+            echo
+            echo "Chunk count:"
+
+            find data/chunks \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              | wc -l
+
+            echo
+            echo "First chunks:"
+
+            find data/chunks \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
               | sort \
-              | head -200
+              | head -20
+
+            echo
+            echo "Sample files:"
+
+            find data/chunks \
+              -type f \
+              | sort \
+              | head -50
+
+          else
+
+            echo "data/chunks does not exist."
+
           fi
 
-          echo
-          echo "SUMMARY:"
+      # ======================================================
+      # SUMMARY
+      # ======================================================
+
+      - name: Show summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "SUMMARY"
+          echo "=========================================="
 
           if [ -f data/summary.json ]; then
             cat data/summary.json
+          else
+            echo "summary.json not found."
           fi
 
-          echo
-          echo "ARCHIVE:"
+      # ======================================================
+      # ARCHIVE
+      # ======================================================
+
+      - name: Archive information
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "ARCHIVE"
+          echo "=========================================="
 
           if [ -f pune-1km-chunks.tar.gz ]; then
-            ls -lh pune-1km-chunks.tar.gz
+            ls -lh \
+              pune-1km-chunks.tar.gz
+          else
+            echo "Archive not found."
           fi
+
+      # ======================================================
+      # UPLOAD
+      # ======================================================
 
       - name: Upload processed chunks
         if: success()
