@@ -1,4 +1,4 @@
-name: Pune 1KM Processor v8
+name: Pune 1KM Processor v9
 
 on:
   workflow_dispatch:
@@ -12,16 +12,8 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
       - name: Checkout
         uses: actions/checkout@v5
-
-      # ============================================================
-      # VERIFY SOURCE
-      # ============================================================
 
       - name: Verify source
         run: |
@@ -36,30 +28,14 @@ jobs:
 
           echo
           echo "=============================================="
-          echo "PROCESSOR FILE"
+          echo "PROCESSOR"
           echo "=============================================="
 
           test -f processor.py
           ls -lh processor.py
 
           echo
-          echo "=============================================="
-          echo "WORKFLOW"
-          echo "=============================================="
-
-          test -f .github/workflows/process.yml
-          ls -lh .github/workflows/process.yml
-
-          echo
-          echo "=============================================="
-          echo "PROCESSOR HEADER"
-          echo "=============================================="
-
-          head -25 processor.py
-
-      # ============================================================
-      # INSTALL OSMIUM
-      # ============================================================
+          head -30 processor.py
 
       - name: Install system packages
         run: |
@@ -77,16 +53,12 @@ jobs:
             python3-pip
 
           echo
-          echo "OSMIUM VERSION"
+          echo "OSMIUM:"
           osmium --version
 
           echo
-          echo "PYTHON VERSION"
+          echo "PYTHON:"
           python3 --version
-
-      # ============================================================
-      # DOWNLOAD RAW PBF
-      # ============================================================
 
       - name: Download raw PBF
         env:
@@ -109,59 +81,44 @@ jobs:
 
           test -s raw/central-zone.osm.pbf
 
-          echo
-          echo "RAW PBF:"
           ls -lh raw/central-zone.osm.pbf
-
-      # ============================================================
-      # VERIFY RAW PBF
-      # ============================================================
 
       - name: Verify raw PBF
         run: |
           set -e
 
           echo "=============================================="
-          echo "RAW PBF FILEINFO"
+          echo "RAW PBF INFO"
           echo "=============================================="
 
-          osmium fileinfo raw/central-zone.osm.pbf
-
-      # ============================================================
-      # PYTHON DEPENDENCIES
-      # ============================================================
+          osmium fileinfo \
+            --extended \
+            raw/central-zone.osm.pbf
 
       - name: Install Python dependencies
         run: |
           set -e
 
           echo "=============================================="
-          echo "INSTALL PYTHON DEPENDENCIES"
+          echo "PYTHON DEPENDENCIES"
           echo "=============================================="
 
           python3 -m pip install --upgrade pip
 
-          python3 -m pip install -r requirements.txt
-
-      # ============================================================
-      # PYTHON SYNTAX CHECK
-      # ============================================================
+          python3 -m pip install \
+            -r requirements.txt
 
       - name: Syntax check
         run: |
           set -e
 
           echo "=============================================="
-          echo "PYTHON SYNTAX CHECK"
+          echo "SYNTAX CHECK"
           echo "=============================================="
 
           python3 -m py_compile processor.py
 
           echo "Python syntax OK"
-
-      # ============================================================
-      # RUN PROCESSOR
-      # ============================================================
 
       - name: Run processor
         run: |
@@ -173,10 +130,6 @@ jobs:
 
           python3 processor.py
 
-      # ============================================================
-      # VALIDATE OUTPUT
-      # ============================================================
-
       - name: Validate output
         run: |
           set -e
@@ -187,7 +140,6 @@ jobs:
 
           test -f data/grid.geojson
           test -f data/summary.json
-
           test -d data/chunks
 
           CHUNK_COUNT=$(find data/chunks \
@@ -197,6 +149,7 @@ jobs:
             -name 'PUNE_*' \
             | wc -l)
 
+          echo
           echo "Chunk count: ${CHUNK_COUNT}"
 
           if [ "${CHUNK_COUNT}" -le 0 ]; then
@@ -209,17 +162,13 @@ jobs:
           cat data/summary.json
 
           echo
-          echo "CHUNKS:"
+          echo "CHUNK FILES:"
+
           find data/chunks \
-            -maxdepth 2 \
             -type f \
             -printf '%p %s bytes\n' \
             | sort \
-            | head -200
-
-      # ============================================================
-      # CREATE ARTIFACT
-      # ============================================================
+            | head -300
 
       - name: Prepare artifact
         run: |
@@ -230,27 +179,31 @@ jobs:
           echo "=============================================="
 
           rm -rf artifact
+
           mkdir -p artifact
 
-          cp -r data/chunks artifact/chunks
-          cp data/grid.geojson artifact/grid.geojson
-          cp data/summary.json artifact/summary.json
+          cp -r data/chunks \
+            artifact/chunks
+
+          cp data/grid.geojson \
+            artifact/grid.geojson
+
+          cp data/summary.json \
+            artifact/summary.json
 
           echo
           echo "ARTIFACT SIZE:"
+
           du -sh artifact
 
           echo
           echo "ARTIFACT FILES:"
+
           find artifact \
             -type f \
             -printf '%p %s bytes\n' \
             | sort \
             | head -300
-
-      # ============================================================
-      # UPLOAD ARTIFACT
-      # ============================================================
 
       - name: Upload processor artifact
         uses: actions/upload-artifact@v4
@@ -261,10 +214,6 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-      # ============================================================
-      # FINAL
-      # ============================================================
-
       - name: Final report
         run: |
           echo
@@ -273,9 +222,9 @@ jobs:
           echo "=============================================="
 
           echo
-          echo "Commit:"
+          echo "COMMIT:"
           git rev-parse HEAD
 
           echo
-          echo "Summary:"
+          echo "SUMMARY:"
           cat data/summary.json
