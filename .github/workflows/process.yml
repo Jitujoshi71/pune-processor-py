@@ -1,4 +1,4 @@
-name: Process Pune 1km Chunks
+name: Pune 1KM Processor v8
 
 on:
   workflow_dispatch:
@@ -8,66 +8,95 @@ permissions:
 
 jobs:
   process:
-
     runs-on: ubuntu-latest
-
-    timeout-minutes: 360
 
     steps:
 
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: System information
+      # ============================================================
+      # VERIFY SOURCE
+      # ============================================================
+
+      - name: Verify source
         run: |
           set -e
 
-          echo "=========================================="
-          echo "SYSTEM"
-          echo "=========================================="
+          echo "=============================================="
+          echo "COMMIT"
+          echo "=============================================="
 
-          echo "CPU:"
-          nproc
-
-          echo
-          echo "RAM:"
-          free -h
+          git rev-parse HEAD
+          git log -1 --oneline
 
           echo
-          echo "DISK:"
-          df -h
+          echo "=============================================="
+          echo "PROCESSOR FILE"
+          echo "=============================================="
 
-      - name: Install osmium
+          test -f processor.py
+          ls -lh processor.py
+
+          echo
+          echo "=============================================="
+          echo "WORKFLOW"
+          echo "=============================================="
+
+          test -f .github/workflows/process.yml
+          ls -lh .github/workflows/process.yml
+
+          echo
+          echo "=============================================="
+          echo "PROCESSOR HEADER"
+          echo "=============================================="
+
+          head -25 processor.py
+
+      # ============================================================
+      # INSTALL OSMIUM
+      # ============================================================
+
+      - name: Install system packages
         run: |
           set -e
+
+          echo "=============================================="
+          echo "INSTALL SYSTEM PACKAGES"
+          echo "=============================================="
 
           sudo apt-get update
 
           sudo apt-get install -y \
-            osmium-tool
+            osmium-tool \
+            python3 \
+            python3-pip
 
-          osmium version
+          echo
+          echo "OSMIUM VERSION"
+          osmium --version
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+          echo
+          echo "PYTHON VERSION"
+          python3 --version
 
-      - name: Install Python packages
-        run: |
-          set -e
-
-          python -m pip install \
-            --upgrade pip
-
-          pip install \
-            -r requirements.txt
+      # ============================================================
+      # DOWNLOAD RAW PBF
+      # ============================================================
 
       - name: Download raw PBF
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
+
+          echo "=============================================="
+          echo "DOWNLOAD RAW PBF"
+          echo "=============================================="
 
           mkdir -p raw
 
@@ -78,92 +107,175 @@ jobs:
             --dir raw \
             --clobber
 
-          test -f raw/central-zone.osm.pbf
+          test -s raw/central-zone.osm.pbf
 
-          ls -lh \
-            raw/central-zone.osm.pbf
+          echo
+          echo "RAW PBF:"
+          ls -lh raw/central-zone.osm.pbf
 
-      - name: Validate PBF
+      # ============================================================
+      # VERIFY RAW PBF
+      # ============================================================
+
+      - name: Verify raw PBF
         run: |
           set -e
 
-          osmium fileinfo \
-            raw/central-zone.osm.pbf \
-            --extended
+          echo "=============================================="
+          echo "RAW PBF FILEINFO"
+          echo "=============================================="
+
+          osmium fileinfo raw/central-zone.osm.pbf
+
+      # ============================================================
+      # PYTHON DEPENDENCIES
+      # ============================================================
+
+      - name: Install Python dependencies
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "INSTALL PYTHON DEPENDENCIES"
+          echo "=============================================="
+
+          python3 -m pip install --upgrade pip
+
+          python3 -m pip install -r requirements.txt
+
+      # ============================================================
+      # PYTHON SYNTAX CHECK
+      # ============================================================
+
+      - name: Syntax check
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "PYTHON SYNTAX CHECK"
+          echo "=============================================="
+
+          python3 -m py_compile processor.py
+
+          echo "Python syntax OK"
+
+      # ============================================================
+      # RUN PROCESSOR
+      # ============================================================
 
       - name: Run processor
         run: |
           set -e
 
-          python -u processor.py
+          echo "=============================================="
+          echo "START PROCESSOR"
+          echo "=============================================="
 
-      - name: Verify output
-        if: always()
+          python3 processor.py
+
+      # ============================================================
+      # VALIDATE OUTPUT
+      # ============================================================
+
+      - name: Validate output
         run: |
-          set +e
+          set -e
 
-          echo "=========================================="
-          echo "VERIFYING OUTPUT"
-          echo "=========================================="
+          echo "=============================================="
+          echo "VALIDATING OUTPUT"
+          echo "=============================================="
 
-          if [ -d data/chunks ]; then
+          test -f data/grid.geojson
+          test -f data/summary.json
 
-            echo
-            echo "CHUNK COUNT:"
+          test -d data/chunks
 
-            find data/chunks \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -type d \
-              | wc -l
+          CHUNK_COUNT=$(find data/chunks \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -name 'PUNE_*' \
+            | wc -l)
 
-            echo
-            echo "FIRST CHUNKS:"
+          echo "Chunk count: ${CHUNK_COUNT}"
 
-            find data/chunks \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -type d \
-              | sort \
-              | head -20
-
-            echo
-            echo "SAMPLE FILES:"
-
-            find data/chunks \
-              -type f \
-              | sort \
-              | head -50
-
-          else
-
-            echo "ERROR: data/chunks missing"
-
+          if [ "${CHUNK_COUNT}" -le 0 ]; then
+            echo "ERROR: No chunks generated"
+            exit 1
           fi
 
           echo
           echo "SUMMARY:"
-
-          if [ -f data/summary.json ]; then
-            cat data/summary.json
-          fi
+          cat data/summary.json
 
           echo
-          echo "ARCHIVE:"
+          echo "CHUNKS:"
+          find data/chunks \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p %s bytes\n' \
+            | sort \
+            | head -200
 
-          if [ -f pune-1km-chunks.tar.gz ]; then
-            ls -lh pune-1km-chunks.tar.gz
-          fi
+      # ============================================================
+      # CREATE ARTIFACT
+      # ============================================================
 
-      - name: Upload processed data
-        if: success()
+      - name: Prepare artifact
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "PREPARING ARTIFACT"
+          echo "=============================================="
+
+          rm -rf artifact
+          mkdir -p artifact
+
+          cp -r data/chunks artifact/chunks
+          cp data/grid.geojson artifact/grid.geojson
+          cp data/summary.json artifact/summary.json
+
+          echo
+          echo "ARTIFACT SIZE:"
+          du -sh artifact
+
+          echo
+          echo "ARTIFACT FILES:"
+          find artifact \
+            -type f \
+            -printf '%p %s bytes\n' \
+            | sort \
+            | head -300
+
+      # ============================================================
+      # UPLOAD ARTIFACT
+      # ============================================================
+
+      - name: Upload processor artifact
         uses: actions/upload-artifact@v4
         with:
           name: pune-1km-chunks
-          path: |
-            pune-1km-chunks.tar.gz
-            data/grid.geojson
-            data/summary.json
-          compression-level: 0
+          path: artifact/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+
+      # ============================================================
+      # FINAL
+      # ============================================================
+
+      - name: Final report
+        run: |
+          echo
+          echo "=============================================="
+          echo "PROCESSOR WORKFLOW COMPLETED"
+          echo "=============================================="
+
+          echo
+          echo "Commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Summary:"
+          cat data/summary.json
